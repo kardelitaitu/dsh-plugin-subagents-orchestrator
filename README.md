@@ -123,7 +123,7 @@ dsh plugin --profile desktop add dsh-plugin-subagents-orchestrator
 You can also install straight from a GitHub repository:
 
 ```bash
-dsh plugin --profile web add github:username/repository-name
+dsh plugin --profile web add github:kardelitaitu/dsh-plugin-subagents-orchestrator
 ```
 
 Replace `username/repository-name` with this plugin's GitHub owner/repo, and `--profile` with the profile you boot. If pnpm asks to allow build scripts during a git-hosted install, add the exact key it prints under `allowBuilds` in the profile's `pnpm-workspace.yaml` and re-run the command.
