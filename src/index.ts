@@ -286,11 +286,15 @@ export function apply(ctx: CordisContext): void {
       );
       recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
 
-      // Credential failures point at the account, not at transient load:
-      // pacing more retries against a dead key is pure waste, so they skip
-      // the same-endpoint budget and switch accounts at once (same exception
-      // as provider cooldown hints).
-      const isCredentialFailure = failure.code === 'INVALID_CREDENTIAL' || failure.code === 'MISSING_CREDENTIAL';
+      // Terminal failures point at the account, not at transient load: an
+      // exhausted quota/balance and a broken credential cannot heal on the
+      // same endpoint, so pacing more retries against it is pure waste. They
+      // skip the same-endpoint budget and switch accounts at once (same
+      // exception as provider cooldown hints).
+      const isTerminalFailure =
+        failure.code === 'INVALID_CREDENTIAL' ||
+        failure.code === 'MISSING_CREDENTIAL' ||
+        failure.code === 'QUOTA';
 
       // Same-endpoint retry budget: retry the CURRENT endpoint up to
       // `maxRetries` times (default 20) with the configured 3-5s pacing
@@ -301,7 +305,7 @@ export function apply(ctx: CordisContext): void {
       // A provider cooldown hint is the exception: the endpoint is tripped
       // for exactly the window the provider asked for, so pacing 3-5s
       // retries against it is futile — fail over immediately instead.
-      if (hintMs === null && !isCredentialFailure) {
+      if (hintMs === null && !isTerminalFailure) {
         const incident = retryIncidents.get(agent.id);
         const sameIncident = incident !== undefined
           && incident.endpointKey === endpointKey
