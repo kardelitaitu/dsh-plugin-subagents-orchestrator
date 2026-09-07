@@ -101,8 +101,12 @@ export function apply(ctx: CordisContext): void {
     retries: number;
   }
   const retryIncidents = new Map<string, RetryIncident>();
-  /** Agents whose failover walk is spent for the current incident; cleared with the incident state. */
-  const exhaustedAgents = new Set<string>();
+  /**
+   * Agents whose failover walk is spent for the current incident, keyed by
+   * agent id with the incident's turn/step. Same incident -> keep deferring;
+   * a different turn/step re-arms the walk.
+   */
+  const exhaustedAgents = new Map<string, { turn: unknown; step: unknown }>();
 
   // Start zero-latency in-memory config cache & file watcher
   initWatcher();
@@ -247,11 +251,34 @@ export function apply(ctx: CordisContext): void {
       if (!currentEndpoint) return next();
       const endpointKey = defaultCircuitBreaker.getEndpointKey(currentEndpoint);
 
+      // A provider cooldown hint re-arms the walk BEFORE the exhaustion check:
+      // the endpoint was tripped for the provider's exact window, so a prior
+      // give-up of THIS incident is stale info. Other incidents are untouched.
+      const hintMs = extractCooldownHintMs(failure);
+      if (hintMs !== null) {
+        const marker = exhaustedAgents.get(agent.id);
+        if (marker && marker.turn === payload.turn && marker.step === payload.step) {
+          exhaustedAgents.delete(agent.id);
+        }
+      }
+
+      // The walk is spent for this incident: keep accounting the failure
+      // (breaker + telemetry still learn about it) but defer the decision -
+      // never re-plan a failover the plugin already declined.
+      const exhaustedMarker = exhaustedAgents.get(agent.id);
+      if (
+        exhaustedMarker &&
+        exhaustedMarker.turn === payload.turn &&
+        exhaustedMarker.step === payload.step
+      ) {
+        pendingFailovers.delete(agent.id);
+        return next();
+      }
+
       // Trip circuit breaker on failure. A provider cooldown hint
       // (Retry-After / x-ratelimit-reset, host-parsed when available) trips
       // the endpoint immediately for exactly that window; otherwise the
       // consecutive-failure threshold and the configured cooldown apply.
-      const hintMs = extractCooldownHintMs(failure);
       defaultCircuitBreaker.recordFailure(
         currentEndpoint,
         hintMs !== null ? 1 : config.maxFailures || 3,
@@ -264,11 +291,6 @@ export function apply(ctx: CordisContext): void {
       // the same-endpoint budget and switch accounts at once (same exception
       // as provider cooldown hints).
       const isCredentialFailure = failure.code === 'INVALID_CREDENTIAL' || failure.code === 'MISSING_CREDENTIAL';
-      if (hintMs !== null) {
-        // A provider cooldown hint re-arms the walk: the endpoint was tripped
-        // for the provider's exact window, so past exhaustion is stale info.
-        exhaustedAgents.delete(agent.id);
-      }
 
       // Same-endpoint retry budget: retry the CURRENT endpoint up to
       // `maxRetries` times (default 20) with the configured 3-5s pacing
@@ -286,12 +308,6 @@ export function apply(ctx: CordisContext): void {
           && incident.turn === payload.turn
           && incident.step === payload.step;
         const retries = sameIncident ? incident.retries + 1 : 1;
-        if (!sameIncident) {
-          // A new incident (new turn/step/endpoint) re-arms the walk: the
-          // exhaustion marker is scoped to one incident, not to the agent's
-          // whole lifetime.
-          exhaustedAgents.delete(agent.id);
-        }
         retryIncidents.set(agent.id, {
           endpointKey,
           turn: payload.turn,
@@ -315,7 +331,7 @@ export function apply(ctx: CordisContext): void {
       // still beat a hard stall).
       const currentIndex = endpoints.findIndex((e) => defaultCircuitBreaker.getEndpointKey(e) === endpointKey);
       const current = pendingFailovers.get(agent.id) || { count: 0, index: currentIndex >= 0 ? currentIndex : 0 };
-      if (current.count >= endpoints.length - 1 || exhaustedAgents.has(agent.id)) {
+      if (current.count >= endpoints.length - 1) {
         // Give up on this agent for this incident. Without clearing the state,
         // a later host-driven retry would still be rewritten onto the stale
         // failover target even though the plugin declined to fail over again.
@@ -324,7 +340,7 @@ export function apply(ctx: CordisContext): void {
         // walk and ping-pong a fully dead pool forever.
         pendingFailovers.delete(agent.id);
         retryIncidents.delete(agent.id);
-        exhaustedAgents.add(agent.id);
+        exhaustedAgents.set(agent.id, { turn: payload.turn, step: payload.step });
         return next();
       }
 
