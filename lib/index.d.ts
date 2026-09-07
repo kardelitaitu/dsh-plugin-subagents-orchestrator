@@ -21,6 +21,8 @@ interface OrchestratorConfig {
     maxRetries?: number;
     /** Emit structured telemetry debug lines for every routing event. */
     debug?: boolean;
+    /** Opt-in: flush telemetry events and endpoint stats to ~/.dsh/telemetry on dispose. */
+    persistTelemetry?: boolean;
     endpoints?: Endpoint[];
 }
 interface AgentSessionHeader {

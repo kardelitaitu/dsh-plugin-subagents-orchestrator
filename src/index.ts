@@ -19,7 +19,7 @@ import {
 import { pickNextEndpoint } from './balancer.js';
 import { defaultCircuitBreaker } from './health.js';
 import { extractCooldownHintMs } from './ratelimit.js';
-import { recordRequest, recordFailure, recordFailover, resetTelemetry, setDebugLogging } from './telemetry.js';
+import { recordRequest, recordFailure, recordFailover, resetTelemetry, setDebugLogging, forgetAgent } from './telemetry.js';
 import { flushTelemetryToDisk } from './persist.js';
 
 export const name = 'dsh-plugin-subagents-orchestrator';
@@ -467,6 +467,10 @@ export function apply(ctx: CordisContext): void {
       activeEndpoints.delete(agent.id);
       retryIncidents.delete(agent.id);
       exhaustedAgents.delete(agent.id);
+      // Success-path latency bookkeeping has no other consumer: without
+      // this release every successful subagent leaks its request-start
+      // entry for the host's whole lifetime.
+      forgetAgent(agent.id);
     }
   });
 

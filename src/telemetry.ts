@@ -130,6 +130,22 @@ export function recordRequest(agentId: string, endpoint: TelemetryEndpointRef, n
   emit({ at: now, type: 'request', agentId, to: { ...endpoint } });
 }
 
+/**
+ * Number of agents with an unresolved request-start entry.
+ *
+ * Entries are consumed by recordFailure; agents whose requests succeed
+ * rely on forgetAgent (agent/disposed) to release theirs - otherwise every
+ * successful subagent leaks an entry for the host's whole lifetime.
+ */
+export function getInFlightRequests(): number {
+  return requestStarts.size;
+}
+
+/** Release an agent's in-flight request-start entry (idempotent, safe for unknown ids). */
+export function forgetAgent(agentId: string): void {
+  requestStarts.delete(agentId);
+}
+
 /** Record a failure attributed to `endpoint`, including any cooldown hint that was applied. */
 export function recordFailure(
   agentId: string,
