@@ -39,6 +39,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   telemetry counters; `formatDiagnostics()` renders a compact report.
   Strictly non-mutating — breaker health is derived without tripping the
   probation transition, and probing never touches the disk.
+- Durable telemetry persistence (`persist.ts`, opt-in via
+  `persistTelemetry`): on plugin dispose the event ring is drained into
+  day-bucketed JSONL (7-day retention) and an endpoint-stats snapshot is
+  written atomically under `~/.dsh/telemetry/subagents-orchestrator`;
+  every failure path is best-effort so diagnostics can never take the
+  host plane down, and the default stays off (no disk side effects).
+- Offline report script (`scripts/telemetry-report.mjs`): dependency-free,
+  read-only reader for the persisted diagnostics — human-readable or
+  `--json`, `--events N` tail, works while DSH runs or after a crash;
+  missing or corrupt stores degrade to a location report.
+
+### Changed
+
+- Failover now defaults to on: only an explicit `failover: false`
+  disables it.
+- Terminal failures (`QUOTA`, `INVALID_CREDENTIAL`,
+  `MISSING_CREDENTIAL`) skip the same-endpoint retry budget and switch
+  accounts on the first failure, the same way provider cooldown hints do.
 
 ### Fixed
 
