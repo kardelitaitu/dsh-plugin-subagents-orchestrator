@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { apply, DEFAULT_MAX_RETRIES, resolveMaxRetries } from '../src/index.js';
 import { setConfigForTest, disposeWatcher } from '../src/config.js';
 import { defaultCircuitBreaker } from '../src/health.js';
-import { resetTelemetry } from '../src/telemetry.js';
+import { getRecentEvents, resetTelemetry } from '../src/telemetry.js';
 import { MockCordisContext, createMockAgent } from './mocks/cordis.js';
 
 /**
@@ -344,5 +344,49 @@ describe('Per-endpoint retry budget (same-endpoint retries before failover)', ()
     expect(resolveMaxRetries({ maxRetries: 0 })).toBe(0);
     expect(resolveMaxRetries({ maxRetries: 5 })).toBe(5);
     expect(resolveMaxRetries({ maxRetries: 7.9 })).toBe(7);
+  });
+
+  it('still accounts post-give-up failures (breaker + telemetry) while deferring', async () => {
+    setConfigForTest({
+      enabled: true,
+      failover: true,
+      maxRetries: 1,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      endpoints: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' }
+      ]
+    });
+
+    apply(ctx);
+
+    const subagent = createMockAgent('sub-giveup-acct-1', 'subagent');
+    const fail = () => ctx.emit(
+      'agent/request-error',
+      { agent: subagent, failure: { code: 'SERVER' }, turn: 1, step: 1 },
+      () => 'host'
+    );
+
+    // Walk to give-up: p1 retry -> p1 exhausted -> failover p2 -> p2 fresh
+    // budget retry -> p2 exhausted -> defer (give-up marker set).
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+    await fail();
+    await fail();
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+    await fail();
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p2', model: 'm2' }));
+    await fail();
+    const failuresAtGiveUp = getRecentEvents().filter((e) => e.type === 'failure').length;
+    const p2StreakAtGiveUp = defaultCircuitBreaker.getStatus({ provider: 'p2', model: 'm2' }).consecutiveFailures;
+
+    // Two MORE failures in the same incident: the decision defers to the
+    // host, but the failure is still real — the breaker streak and the
+    // telemetry ring must keep learning about it.
+    expect(await fail()).toBe('host');
+    expect(await fail()).toBe('host');
+
+    expect(getRecentEvents().filter((e) => e.type === 'failure').length).toBe(failuresAtGiveUp + 2);
+    expect(defaultCircuitBreaker.getStatus({ provider: 'p2', model: 'm2' }).consecutiveFailures).toBe(p2StreakAtGiveUp + 2);
   });
 });
