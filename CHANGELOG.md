@@ -30,6 +30,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Per-endpoint `enabled` toggle: parked endpoints stay in config but are
   excluded from routing and failover.
 - `cooldownMs` / `maxFailures` config options.
+- Failure-latency metrics per endpoint: the request-to-failure span is
+  sampled into `latencySamples`/`latencyTotalMs`/`latencyMaxMs`/
+  `lastLatencyMs` and exposed as `latencyMs` on failure events.
+- Read-only diagnostics snapshot (`./diagnostics` subpath):
+  `getDiagnosticsSnapshot()` aggregates config presence, effective
+  switches, the endpoint list with parked marking, breaker health and
+  telemetry counters; `formatDiagnostics()` renders a compact report.
+  Strictly non-mutating — breaker health is derived without tripping the
+  probation transition, and probing never touches the disk.
 
 ### Fixed
 

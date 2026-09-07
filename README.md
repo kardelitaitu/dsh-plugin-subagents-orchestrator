@@ -77,9 +77,33 @@ subagents-orchestrator:
 | `intervalMinMs` | `number` | `3000` | Lower bound of the randomized wait before a retried subagent request (failover pacing; `0` disables the wait) |
 | `intervalMaxMs` | `number` | `5000` | Upper bound of the randomized wait before a retried subagent request (failover pacing) |
 | `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |
+| `persistTelemetry` | `boolean` | `false` | Opt-in: on plugin dispose, flush buffered telemetry events (day-bucketed JSONL, 7-day retention) and an endpoint-stats snapshot to `~/.dsh/telemetry/subagents-orchestrator` for offline diagnostics |
 | `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight?, enabled? }` endpoints (`weight` feeds the `"weighted"` strategy; `enabled: false` parks an endpoint — it stays in the config but is excluded from routing, failover targets and telemetry) |
 
 ---
+
+## Diagnostics
+
+A read-only live-state snapshot is available as a standalone subpath, so tooling and support flows can inspect the orchestrator without importing its Cordis hooks:
+
+```ts
+import { getDiagnosticsSnapshot, formatDiagnostics } from 'dsh-plugin-subagents-orchestrator/diagnostics';
+
+const snapshot = getDiagnosticsSnapshot();
+// JSON-serializable: config presence, effective switches (active/strategy/
+// failover/pacing), every configured endpoint marked in-pool or parked,
+// per-endpoint circuit-breaker health (trippedUntil, streak) and telemetry
+// counters incl. failure-latency samples.
+
+console.log(formatDiagnostics(snapshot));
+// subagents-orchestrator diagnostics @ 2026-09-08T...Z
+// config: present | active=true strategy=round-robin failover=true | ...
+// effective pool: 3 endpoint(s)
+// - p1::m1 [pool healthy req=12 fail=1 failover=0 fail-latency n=1 avg=800ms max=800ms]
+// - p2::m2 [parked healthy req=0 fail=0 failover=0]
+```
+
+The snapshot is strictly non-mutating: breaker health is derived from the stored status rather than `isHealthy()`, whose probation transition is a state write — probing never changes routing behavior, touches the disk, or reads live references (every call returns fresh plain data). It is safe to call before `apply()`, after dispose, and with a missing or malformed settings file.
 
 ## Project Structure
 
@@ -92,9 +116,11 @@ subagents-orchestrator:
 │   ├── health.ts           # per-endpoint circuit breaker (closed/open/half-open)
 │   ├── ratelimit.ts        # Retry-After / x-ratelimit-reset cooldown parsing
 │   ├── telemetry.ts        # per-endpoint routing/failure/failover stats + debug event stream
+│   ├── persist.ts          # durable diagnostics: day-bucketed JSONL + endpoint snapshot
+│   ├── diagnostics.ts      # read-only live-state snapshot (./diagnostics subpath)
 │   └── types.ts            # Shared TypeScript contracts
 ├── tests/                  # Vitest suite (unit + plugin behavior, mock Cordis context)
-├── lib/                    # Build output (tsup: index.js + index.d.ts + sourcemap)
+├── lib/                    # Build output (tsup: index.js, diagnostics.js + d.ts + sourcemaps)
 ├── cordis.patch.yml        # DSH Cordis profile patch definition
 ├── package.json            # NPM package manifest
 ├── CHANGELOG.md            # Release notes (Keep a Changelog)
