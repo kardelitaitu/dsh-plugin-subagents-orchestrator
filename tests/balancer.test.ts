@@ -59,4 +59,49 @@ describe('Balancer & Routing Strategies', () => {
 
     expect(heavyCount).toBeGreaterThan(40);
   });
+
+  it('pickWeighted should return null for an empty pool', () => {
+    expect(pickWeighted([])).toBeNull();
+  });
+
+  it('pickWeighted should treat missing, zero and NaN weights as weight 1', () => {
+    const odd: Endpoint[] = [
+      { provider: 'zero', model: 'm1', weight: 0 },
+      { provider: 'nan', model: 'm2', weight: Number.NaN },
+      { provider: 'missing', model: 'm3' }
+    ];
+    for (let i = 0; i < 20; i++) {
+      const picked = pickWeighted(odd);
+      expect(odd).toContainEqual(picked);
+    }
+  });
+
+  it('should keep round-robin cursor continuous when a pool member is tripped', () => {
+    const breaker = new CircuitBreaker();
+    // Trip p1 so the healthy pool becomes [p2, p3]
+    breaker.recordFailure(endpoints[0], 1, 60000);
+
+    expect(pickNextEndpoint(endpoints, 'round-robin', 0, breaker)).toEqual(endpoints[1]);
+    expect(pickNextEndpoint(endpoints, 'round-robin', 1, breaker)).toEqual(endpoints[2]);
+    // Cursor wraps over the *pool*, not the original list
+    expect(pickNextEndpoint(endpoints, 'round-robin', 2, breaker)).toEqual(endpoints[1]);
+  });
+
+  it('should sanitize non-integer and negative round-robin cursors', () => {
+    const breaker = new CircuitBreaker();
+    expect(pickNextEndpoint(endpoints, 'round-robin', -1, breaker)).toEqual(endpoints[1]);
+    expect(pickNextEndpoint(endpoints, 'round-robin', -4, breaker)).toEqual(endpoints[1]);
+    expect(pickNextEndpoint(endpoints, 'round-robin', 2.9, breaker)).toEqual(endpoints[2]);
+  });
+
+  it('should degrade unknown strategies to round-robin', () => {
+    const breaker = new CircuitBreaker();
+    const picked = pickNextEndpoint(
+      endpoints,
+      'mystery-strategy' as any,
+      1,
+      breaker
+    );
+    expect(picked).toEqual(endpoints[1]);
+  });
 });

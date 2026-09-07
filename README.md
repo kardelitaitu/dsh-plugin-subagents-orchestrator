@@ -1,6 +1,7 @@
 # DSH Subagents Orchestrator (`dsh-plugin-subagents-orchestrator`)
 
 > Intelligent multi-endpoint load distributor and automated error-failover plugin for **DeepSeek Harness (DSH)** subagents.
+> Coded by glm-5.3-flash
 
 ---
 
@@ -61,7 +62,7 @@ subagents-orchestrator:
 ## Project Structure
 
 ```
-C:/dev/dsh-plugin-subagents-orchestrator/
+/
 ├── lib/
 │   └── index.js            # Core host-plane plugin & Cordis hooks
 ├── cordis.patch.yml        # DSH Cordis profile patch definition
@@ -102,4 +103,4 @@ pnpm install
 
 ## License
 
-MIT (c) Adikara
+MIT (c) kardelitaitu
