@@ -208,3 +208,11 @@ export function resetTelemetry(): void {
   requestStarts.clear();
   debugMode = 'auto';
 }
+
+/**
+ * Atomically hand over the buffered events and clear the ring buffer — the
+ * durable-flushing primitive for persist.ts. Returned events are copies.
+ */
+export function drainRecentEvents(): TelemetryEvent[] {
+  return eventBuffer.splice(0, eventBuffer.length).map((event) => ({ ...event }));
+}
