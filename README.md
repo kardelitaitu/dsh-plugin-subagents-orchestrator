@@ -11,7 +11,7 @@ When building complex projects with DeepSeek Harness, tasks are often delegated 
 
 `dsh-plugin-subagents-orchestrator` is a lightweight, host-plane Cordis plugin that intercepts all subagent creations and:
 1. **Distributes subagent workloads** across multiple LLM provider accounts/endpoints using **round-robin**, **random**, or **weighted** strategies.
-2. **Provides automated, resilient failover**: If a subagent encounters a rate limit (`RATE_LIMIT`), quota exhaustion (`QUOTA`), server error (`SERVER`), timeout (`TIMEOUT`), or transport issue (`TRANSPORT`), the plugin dynamically retries that subagent on the next configured endpoint in your pool without failing the main conversation.
+2. **Provides automated, resilient failover**: If a subagent encounters a rate limit (`RATE_LIMIT`), quota exhaustion (`QUOTA`), server error (`SERVER`), timeout (`TIMEOUT`), or transport issue (`TRANSPORT`), the plugin first retries the failing endpoint up to `maxRetries` times (default 20) with a 3-5 second randomized pause, then fails over to the next endpoint in your pool — giving each fallback endpoint its own fresh retry budget — without failing the main conversation.
 3. **Zero UI interference**: Runs entirely on the host plane, meaning zero risk of client module crashes, web boot stalls, or frontend incompatibilities.
 
 ---
@@ -40,6 +40,9 @@ subagents-orchestrator:
   enabled: true
   strategy: round-robin    # "round-robin" | "random" | "weighted"
   failover: true           # Automatically switch endpoint on failure
+  maxRetries: 20           # Same-endpoint retries (3-5s apart) before switching endpoint
+  intervalMinMs: 3000      # Subagent retry pause lower bound (ms)
+  intervalMaxMs: 5000      # Subagent retry pause upper bound (ms)
   cooldownMs: 120000       # Cooldown once an endpoint trips (provider hints override)
   maxFailures: 20          # Consecutive failures before an endpoint trips
   debug: false             # Emit structured telemetry lines for every routing event
@@ -70,6 +73,8 @@ subagents-orchestrator:
 | `failover` | `boolean` | `true` | Automatically failover to next endpoint on rate limits/errors |
 | `cooldownMs` | `number` | `60000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
 | `maxFailures` | `number` | `3` | Consecutive failures before an endpoint trips |
+| `intervalMinMs` | `number` | `3000` | Lower bound of the randomized wait before a retried subagent request (failover pacing; `0` disables the wait) |
+| `intervalMaxMs` | `number` | `5000` | Upper bound of the randomized wait before a retried subagent request (failover pacing) |
 | `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |
 | `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight?, enabled? }` endpoints (`weight` feeds the `"weighted"` strategy; `enabled: false` parks an endpoint — it stays in the config but is excluded from routing, failover targets and telemetry) |
 

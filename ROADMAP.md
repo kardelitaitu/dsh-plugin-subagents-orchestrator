@@ -11,7 +11,7 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 - [x] Support multiple endpoints with `round-robin` and `random` routing algorithms.
 - [x] Implement subagent-only error failover for connection errors (`RATE_LIMIT`, `QUOTA`, `TIMEOUT`, `SERVER`, `TRANSPORT`, `EMPTY_RESPONSE`).
 - [x] Support automatic failover retries to alternative pool endpoints.
-- [x] Integrate settings directly from `~/.dsh/settings.yaml`.
+- [x] Integrate settings directly from `~/.dsh/settings.yaml` (zero-disk-I/O in-memory cache with debounced `fs.watch` hot reload).
 
 ---
 
@@ -27,6 +27,9 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 - [x] **Per-Endpoint Toggles & Debug Flag**:
   - `enabled: false` parks an endpoint (kept in config, excluded from routing and failover).
   - `debug: true` emits structured telemetry lines (also available via `DSH_ORCHESTRATOR_DEBUG=1`).
+- [x] **Failover Retry Pacing**:
+  - Randomized `intervalMinMs`-`intervalMaxMs` wait before a retried subagent request, cancellable via agent abort or plugin dispose (abort-safe: no phantom failovers).
+  - Provider cooldown hints (`Retry-After` / `x-ratelimit-reset`, host-parsed when available) take priority over the consecutive-failure threshold.
 
 ---
 
@@ -36,8 +39,8 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
   - Push subtle UI session notices or status messages when a subagent fails over to another provider.
 - [ ] **Per-Endpoint Latency & Token Metrics**:
   - Track response latency and token throughput per subagent endpoint.
-- [ ] **Log Integration**:
-  - Structured debug logging accessible via `dsh` CLI diagnostics.
+- [x] **Log Integration**:
+  - Structured debug logging (one JSON line per routing event via `console.debug`), enabled by the config `debug` flag or `DSH_ORCHESTRATOR_DEBUG=1` — reachable through `dsh` CLI diagnostics.
 
 ---
 
@@ -51,5 +54,5 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 ## 📦 Phase 5: Distribution & Packaging
 
-- [ ] Add unit and integration tests simulating subagent session execution.
+- [x] Add unit and integration tests simulating subagent session execution.
 - [ ] Publish to npm / open-source repository for community use.
