@@ -40,6 +40,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./diagnostics": {
+      "types": "./lib/diagnostics.d.ts",
+      "default": "./lib/diagnostics.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
