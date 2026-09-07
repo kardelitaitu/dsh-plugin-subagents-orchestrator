@@ -147,9 +147,11 @@ export function getEndpointStats(): EndpointStats[] {
   return Array.from(statsByKey.values()).map((entry) => ({ ...entry }));
 }
 
-/** The most recent `limit` events (oldest first). */
+/** The most recent `limit` events (oldest first). A limit of 0, negative or
+ *  non-finite yields an empty list rather than the whole buffer. */
 export function getRecentEvents(limit: number = MAX_EVENT_BUFFER): TelemetryEvent[] {
-  return eventBuffer.slice(-Math.max(0, limit)).map((event) => ({ ...event }));
+  if (!Number.isFinite(limit) || limit <= 0) return [];
+  return eventBuffer.slice(-limit).map((event) => ({ ...event }));
 }
 
 /** Forget all telemetry state (used between tests and on plugin dispose). */

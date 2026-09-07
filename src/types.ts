@@ -15,6 +15,10 @@ export interface OrchestratorConfig {
   failover?: boolean;
   cooldownMs?: number;
   maxFailures?: number;
+  /** Lower bound (ms) of the randomized wait before a retried subagent request. */
+  intervalMinMs?: number;
+  /** Upper bound (ms) of the randomized wait before a retried subagent request. */
+  intervalMaxMs?: number;
   /** Emit structured telemetry debug lines for every routing event. */
   debug?: boolean;
   endpoints?: Endpoint[];
@@ -39,6 +43,12 @@ export interface Agent {
 export interface FailureInfo {
   code: string;
   message?: string;
+  /**
+   * Provider-derived retry delay in ms, already parsed and validated by the
+   * host (dsh-llm normalizes the provider's `retry-after` response header).
+   * Preferred over sniffing raw `headers`.
+   */
+  providerRetryAfterMs?: number;
   /** Raw response headers from the failed provider call, when available. */
   headers?: Record<string, string>;
   [key: string]: unknown;
@@ -47,9 +57,23 @@ export interface FailureInfo {
 export interface RequestErrorPayload {
   agent: Agent;
   failure?: FailureInfo;
-  signal?: { aborted?: boolean; [key: string]: unknown };
+  /** Abort signal shape: a subset of AbortSignal, tolerating host variants. */
+  signal?: {
+    aborted?: boolean;
+    addEventListener?: (type: string, listener: () => void, options?: { once?: boolean }) => void;
+    removeEventListener?: (type: string, listener: () => void) => void;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
+
+/**
+ * Decision consumed by the host agent loop (dsh-agent-loop) from the
+ * `agent/request-error` waterfall. `{ kind: 'retry' }` re-runs the request;
+ * anything else (including `undefined`) surfaces the failure. The loop applies
+ * no delay of its own — a decider that wants a delay must wait before returning.
+ */
+export type RequestErrorAction = { kind: 'retry' } | undefined;
 
 export interface AgentRequestOptions {
   provider?: string;
