@@ -133,6 +133,7 @@ node scripts/telemetry-report.mjs --events 50 --dir ~/.dsh/telemetry/subagents-o
 ├── package.json            # NPM package manifest
 ├── CHANGELOG.md            # Release notes (Keep a Changelog)
 ├── README.md               # Project documentation
+├── CONTRIBUTING.md         # Concurrent-session protocol + dev conventions
 └── ROADMAP.md              # Future development roadmap
 ```
 
