@@ -16,6 +16,34 @@ describe('Rate-Limit Cooldown Hint Parsing', () => {
     expect(hint).toBe(30_000);
   });
 
+  it('prefers the host-parsed providerRetryAfterMs over raw headers', () => {
+    const hint = extractCooldownHintMs(
+      { code: 'RATE_LIMIT', providerRetryAfterMs: 45_000, headers: { 'Retry-After': '30' } },
+      NOW
+    );
+    expect(hint).toBe(45_000);
+  });
+
+  it('falls back to header sniffing when providerRetryAfterMs is absent', () => {
+    const hint = extractCooldownHintMs({ code: 'RATE_LIMIT', headers: { 'Retry-After': '30' } }, NOW);
+    expect(hint).toBe(30_000);
+  });
+
+  it('ignores invalid providerRetryAfterMs values and sniffs headers instead', () => {
+    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const hint = extractCooldownHintMs(
+        { code: 'RATE_LIMIT', providerRetryAfterMs: bad, headers: { 'Retry-After': '12' } } as never,
+        NOW
+      );
+      expect(hint).toBe(12_000);
+    }
+  });
+
+  it('caps an oversized host hint at the maximum window', () => {
+    const hint = extractCooldownHintMs({ code: 'RATE_LIMIT', providerRetryAfterMs: 99_999_999 }, NOW);
+    expect(hint).toBe(MAX_HINT_COOLDOWN_MS);
+  });
+
   it('accepts numeric header values', () => {
     const hint = extractCooldownHintMs({ code: 'RATE_LIMIT', headers: { 'retry-after': 120 as unknown as string } }, NOW);
     expect(hint).toBe(120_000);
