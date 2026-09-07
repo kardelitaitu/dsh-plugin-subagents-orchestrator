@@ -134,6 +134,7 @@ node scripts/telemetry-report.mjs --events 50 --dir ~/.dsh/telemetry/subagents-o
 ├── CHANGELOG.md            # Release notes (Keep a Changelog)
 ├── README.md               # Project documentation
 ├── CONTRIBUTING.md         # Concurrent-session protocol + dev conventions
+├── DESIGN-pool-fallback.md # Draft spec: pool/fallback modes (v2, parked)
 └── ROADMAP.md              # Future development roadmap
 ```
 
