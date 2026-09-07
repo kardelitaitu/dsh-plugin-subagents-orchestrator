@@ -101,6 +101,8 @@ export function apply(ctx: CordisContext): void {
     retries: number;
   }
   const retryIncidents = new Map<string, RetryIncident>();
+  /** Agents whose failover walk is spent for the current incident; cleared with the incident state. */
+  const exhaustedAgents = new Set<string>();
 
   // Start zero-latency in-memory config cache & file watcher
   initWatcher();
@@ -257,6 +259,17 @@ export function apply(ctx: CordisContext): void {
       );
       recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
 
+      // Credential failures point at the account, not at transient load:
+      // pacing more retries against a dead key is pure waste, so they skip
+      // the same-endpoint budget and switch accounts at once (same exception
+      // as provider cooldown hints).
+      const isCredentialFailure = failure.code === 'INVALID_CREDENTIAL' || failure.code === 'MISSING_CREDENTIAL';
+      if (hintMs !== null) {
+        // A provider cooldown hint re-arms the walk: the endpoint was tripped
+        // for the provider's exact window, so past exhaustion is stale info.
+        exhaustedAgents.delete(agent.id);
+      }
+
       // Same-endpoint retry budget: retry the CURRENT endpoint up to
       // `maxRetries` times (default 20) with the configured 3-5s pacing
       // before considering a failover. The count is scoped to the failed
@@ -266,13 +279,19 @@ export function apply(ctx: CordisContext): void {
       // A provider cooldown hint is the exception: the endpoint is tripped
       // for exactly the window the provider asked for, so pacing 3-5s
       // retries against it is futile — fail over immediately instead.
-      if (hintMs === null) {
+      if (hintMs === null && !isCredentialFailure) {
         const incident = retryIncidents.get(agent.id);
         const sameIncident = incident !== undefined
           && incident.endpointKey === endpointKey
           && incident.turn === payload.turn
           && incident.step === payload.step;
         const retries = sameIncident ? incident.retries + 1 : 1;
+        if (!sameIncident) {
+          // A new incident (new turn/step/endpoint) re-arms the walk: the
+          // exhaustion marker is scoped to one incident, not to the agent's
+          // whole lifetime.
+          exhaustedAgents.delete(agent.id);
+        }
         retryIncidents.set(agent.id, {
           endpointKey,
           turn: payload.turn,
@@ -296,12 +315,16 @@ export function apply(ctx: CordisContext): void {
       // still beat a hard stall).
       const currentIndex = endpoints.findIndex((e) => defaultCircuitBreaker.getEndpointKey(e) === endpointKey);
       const current = pendingFailovers.get(agent.id) || { count: 0, index: currentIndex >= 0 ? currentIndex : 0 };
-      if (current.count >= endpoints.length - 1) {
-        // Give up on this agent. Without clearing the state, a later host-driven
-        // retry would still be rewritten onto the stale failover target even
-        // though the plugin declined to fail over again.
+      if (current.count >= endpoints.length - 1 || exhaustedAgents.has(agent.id)) {
+        // Give up on this agent for this incident. Without clearing the state,
+        // a later host-driven retry would still be rewritten onto the stale
+        // failover target even though the plugin declined to fail over again.
+        // The exhaustion marker sticks until the incident state resets (a new
+        // turn/step or disposal), otherwise the next failure would restart the
+        // walk and ping-pong a fully dead pool forever.
         pendingFailovers.delete(agent.id);
         retryIncidents.delete(agent.id);
+        exhaustedAgents.add(agent.id);
         return next();
       }
 
@@ -422,6 +445,7 @@ export function apply(ctx: CordisContext): void {
       pendingFailovers.delete(agent.id);
       activeEndpoints.delete(agent.id);
       retryIncidents.delete(agent.id);
+      exhaustedAgents.delete(agent.id);
     }
   });
 
@@ -433,6 +457,7 @@ export function apply(ctx: CordisContext): void {
     pendingFailovers.clear();
     activeEndpoints.clear();
     retryIncidents.clear();
+    exhaustedAgents.clear();
     defaultCircuitBreaker.clear();
     resetTelemetry();
     disposeWatcher();
