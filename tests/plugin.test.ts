@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { apply, isSubagent } from '../src/index.js';
 import { setConfigForTest, disposeWatcher } from '../src/config.js';
 import { defaultCircuitBreaker } from '../src/health.js';
+import { getEndpointStats, getRecentEvents, resetTelemetry } from '../src/telemetry.js';
 import { MockCordisContext, createMockAgent } from './mocks/cordis.js';
 
 describe('Cordis Subagents Orchestrator Plugin', () => {
@@ -9,6 +10,7 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
 
   beforeEach(() => {
     ctx = new MockCordisContext();
+    resetTelemetry();
   });
 
   afterEach(() => {
@@ -221,5 +223,48 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     // p2 is tripped, so the failover target must be p3, not p2
     expect(retry.provider).toBe('p3');
     expect(retry.model).toBe('m3');
+  });
+
+  it('records telemetry across a full failover lifecycle', async () => {
+    setConfigForTest({
+      enabled: true,
+      failover: true,
+      endpoints: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' }
+      ]
+    });
+
+    apply(ctx);
+
+    const subagent = createMockAgent('sub-telemetry-1', 'subagent');
+
+    // 1. Initial (pass-through) request assigned p1
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+
+    // 2. p1 fails with a Retry-After hint
+    await ctx.emit('agent/request-error', {
+      agent: subagent,
+      failure: { code: 'RATE_LIMIT', headers: { 'Retry-After': '30' } }
+    });
+
+    // 3. Retried request lands on p2
+    const retry: any = await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+    expect(retry.provider).toBe('p2');
+
+    // 4. Cleanup clears the agent's tracked endpoint
+    await ctx.emit('agent/disposed', { agent: subagent });
+
+    const stats = getEndpointStats();
+    const p1 = stats.find((s) => s.key === 'p1::m1');
+    const p2 = stats.find((s) => s.key === 'p2::m2');
+
+    expect(p1).toMatchObject({ requests: 1, failures: 1, cooldownHints: 1 });
+    expect(p2).toMatchObject({ requests: 1, failovers: 1 });
+
+    const events = getRecentEvents();
+    expect(events.map((e) => e.type)).toEqual(['request', 'failure', 'failover', 'request']);
+    expect(events[1]).toMatchObject({ code: 'RATE_LIMIT', hintMs: 30000 });
+    expect(events[2]).toMatchObject({ from: { provider: 'p1' }, to: { provider: 'p2' } });
   });
 });

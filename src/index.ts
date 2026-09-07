@@ -17,6 +17,7 @@ import {
 import { pickNextEndpoint } from './balancer.js';
 import { defaultCircuitBreaker } from './health.js';
 import { extractCooldownHintMs } from './ratelimit.js';
+import { recordRequest, recordFailure, recordFailover, resetTelemetry } from './telemetry.js';
 
 export const name = 'dsh-plugin-subagents-orchestrator';
 
@@ -130,6 +131,7 @@ export function apply(ctx: CordisContext): void {
         hintMs !== null ? 1 : config.maxFailures || 3,
         hintMs ?? config.cooldownMs ?? 60000
       );
+      recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
     }
 
     const current = pendingFailovers.get(agent.id) || { count: 0, index: 0 };
@@ -157,6 +159,8 @@ export function apply(ctx: CordisContext): void {
       index: nextIndex
     });
 
+    recordFailover(agent.id, currentEndpoint ?? undefined, endpoints[nextIndex]);
+
     return { kind: 'retry' };
   });
 
@@ -172,11 +176,13 @@ export function apply(ctx: CordisContext): void {
       // can attribute this subagent's failures even before any failover.
       const seed = (await next()) as RequestSeed | null | undefined;
       if (seed && typeof seed.provider === 'string' && typeof seed.model === 'string') {
-        activeEndpoints.set(agent.id, {
+        const assigned: Endpoint = {
           provider: seed.provider,
           model: seed.model,
           ...(typeof seed.reasoningEffort === 'string' ? { reasoningEffort: seed.reasoningEffort } : {})
-        });
+        };
+        activeEndpoints.set(agent.id, assigned);
+        recordRequest(agent.id, assigned);
       }
       return seed;
     }
@@ -186,6 +192,7 @@ export function apply(ctx: CordisContext): void {
     if (!target) return next();
 
     activeEndpoints.set(agent.id, target);
+    recordRequest(agent.id, target);
 
     const seed = (await next()) as RequestSeed | null | undefined;
     if (!seed) return seed;
@@ -213,6 +220,7 @@ export function apply(ctx: CordisContext): void {
     pendingFailovers.clear();
     activeEndpoints.clear();
     defaultCircuitBreaker.clear();
+    resetTelemetry();
     disposeWatcher();
   });
 }
