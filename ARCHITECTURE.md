@@ -132,3 +132,51 @@ debounced `fs.watch` on the settings file (`WATCH_DEBOUNCE_MS = 100`).
   `reloadConfig()` keeps serving the last known good snapshot instead of
   wiping into a state nothing can recover from (retention beats a permanent
   silent shutdown). Re-arming requires a plugin re-init (host restart).
+
+---
+
+## 5. The diagnostics toolchain
+
+Observability is a three-stage pipeline; each stage is independently
+operable and strictly read-only toward the plugin runtime.
+
+### Stage 1 — capture (in-process)
+
+`src/telemetry.ts` attributes every routed event to its endpoint (the
+identity recorded at `agent/request` time) and maintains per-endpoint
+counters plus failure-latency samples (request→failure span; success-side
+latency is unobservable — see §1). A bounded ring buffer keeps recent
+events for debug output. Two independent read paths exist:
+
+- `./diagnostics` subpath — `getDiagnosticsSnapshot()` renders the live
+  state (config, breaker health derived **without** the probation state
+  write, counters) as fresh plain data. Safe before `apply()`, after
+  dispose, and with a broken settings file.
+- debug event stream — `config.debug` / `DSH_ORCHESTRATOR_DEBUG=1` emits
+  one JSON line per routing event via `console.debug`.
+
+### Stage 2 — persistence (opt-in, dispose-time)
+
+With `persistTelemetry: true` (`src/config.ts` schema-gated), the
+dispose effect calls `flushTelemetryToDisk()` (`src/persist.ts`) once:
+drain the ring buffer into `events-YYYY-MM-DD.jsonl` (append-only,
+day-bucketed, 7-day retention), atomically replace `endpoints.json`
+(tmp+rename), prune old buckets. Ordering matters: the flush runs
+**before** `resetTelemetry()` in the dispose effect, or the data would be
+gone. Failure semantics: nothing throws — unwritable roots yield zeroed
+counters; an empty buffer writes nothing, not even the storage root.
+
+### Stage 3 — consumption (out of process)
+
+`scripts/telemetry-report.mjs` reads the persisted artifacts with plain
+`node:fs` — human summary, `--json`, `--events N` newest-first across
+day buckets, corrupt-line tolerance, graceful degradation on missing
+stores. Runs while DSH is live (atomic file snapshots) or post-crash,
+which is its main support scenario: the last flushed state is exactly
+what the plugin held when it was disposed.
+
+### Design rule
+
+Every stage fails soft and never mutates routing state. Diagnostics are
+consumers of the runtime, never participants: no probe path may trip a
+breaker, transition probation, or stall a subagent start.
