@@ -3,6 +3,8 @@ export interface Endpoint {
   model: string;
   reasoningEffort?: string;
   weight?: number;
+  /** Disabled endpoints stay in config but are excluded from routing. */
+  enabled?: boolean;
 }
 
 export type RoutingStrategy = 'round-robin' | 'random' | 'weighted';
@@ -13,6 +15,8 @@ export interface OrchestratorConfig {
   failover?: boolean;
   cooldownMs?: number;
   maxFailures?: number;
+  /** Emit structured telemetry debug lines for every routing event. */
+  debug?: boolean;
   endpoints?: Endpoint[];
 }
 

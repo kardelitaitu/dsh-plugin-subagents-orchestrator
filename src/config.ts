@@ -65,6 +65,10 @@ function parseEndpoint(raw: unknown): Endpoint | null {
     endpoint.weight = weight;
   }
 
+  if (typeof raw['enabled'] === 'boolean') {
+    endpoint.enabled = raw['enabled'];
+  }
+
   return endpoint;
 }
 
@@ -101,6 +105,7 @@ export function parseConfigDocument(doc: unknown): OrchestratorConfig | null {
   // (health.ts); the schema only enforces types.
   if (isFiniteNumber(section['cooldownMs'])) config.cooldownMs = section['cooldownMs'];
   if (isFiniteNumber(section['maxFailures'])) config.maxFailures = section['maxFailures'];
+  if (typeof section['debug'] === 'boolean') config.debug = section['debug'];
 
   if (Array.isArray(section['endpoints'])) {
     const endpoints = (section['endpoints'] as unknown[])
@@ -125,7 +130,10 @@ export function parseConfigFile(filePath: string): OrchestratorConfig | null {
 
 export function extractEndpoints(config: OrchestratorConfig | null): Endpoint[] {
   if (config && Array.isArray(config.endpoints) && config.endpoints.length > 0) {
-    return config.endpoints.filter((e): e is Endpoint => Boolean(e && e.provider && e.model));
+    // `enabled: false` marks an endpoint as parked: it stays in the config for
+    // bookkeeping but is excluded from the effective pool everywhere (routing,
+    // failover candidates, telemetry attribution).
+    return config.endpoints.filter((e): e is Endpoint => Boolean(e && e.provider && e.model && e.enabled !== false));
   }
   return [];
 }

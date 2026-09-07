@@ -24,6 +24,9 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
   - Support priority weights (`weight: 1..10`) per endpoint for tiered provider setups.
 - [x] **Rate Limit Header Parsing**:
   - Parse provider rate limit responses (e.g., `Retry-After`, `x-ratelimit-reset`) to set exact cooldown windows.
+- [x] **Per-Endpoint Toggles & Debug Flag**:
+  - `enabled: false` parks an endpoint (kept in config, excluded from routing and failover).
+  - `debug: true` emits structured telemetry lines (also available via `DSH_ORCHESTRATOR_DEBUG=1`).
 
 ---
 

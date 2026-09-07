@@ -17,7 +17,7 @@ import {
 import { pickNextEndpoint } from './balancer.js';
 import { defaultCircuitBreaker } from './health.js';
 import { extractCooldownHintMs } from './ratelimit.js';
-import { recordRequest, recordFailure, recordFailover, resetTelemetry } from './telemetry.js';
+import { recordRequest, recordFailure, recordFailover, resetTelemetry, setDebugLogging } from './telemetry.js';
 
 export const name = 'dsh-plugin-subagents-orchestrator';
 
@@ -44,6 +44,12 @@ export function apply(ctx: CordisContext): void {
   // Start zero-latency in-memory config cache & file watcher
   initWatcher();
 
+  /** Keep the telemetry debug switch aligned with the hot-reloaded `debug` flag. */
+  function refreshTelemetryDebug(): void {
+    setDebugLogging(getConfig()?.debug);
+  }
+  refreshTelemetryDebug();
+
   function wrapRequest(request?: SubagentRequest): SubagentRequest | undefined {
     if (!request) return request;
     // Respect explicit model if already requested by caller
@@ -51,6 +57,7 @@ export function apply(ctx: CordisContext): void {
 
     const config = getConfig();
     if (!config || config.enabled === false) return request;
+    refreshTelemetryDebug();
 
     const endpoints = getCachedEndpoints();
     if (endpoints.length === 0) return request;
@@ -110,6 +117,7 @@ export function apply(ctx: CordisContext): void {
   const disposeRequestError = ctx.on('agent/request-error', (payload: RequestErrorPayload, next: () => any) => {
     const config = getConfig();
     if (!config || config.failover !== true) return next();
+    refreshTelemetryDebug();
 
     const endpoints = getCachedEndpoints();
     if (endpoints.length < 2) return next();

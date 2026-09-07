@@ -4,6 +4,20 @@
   "description": "Multi-endpoint load distributor and intelligent failover orchestrator for DeepSeek Harness subagents",
   "author": "Adikara",
   "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "cordis",
+    "deepseek",
+    "subagents",
+    "orchestrator",
+    "load-balancer",
+    "failover",
+    "circuit-breaker"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "files": [

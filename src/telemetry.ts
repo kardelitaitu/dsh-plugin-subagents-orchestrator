@@ -53,7 +53,21 @@ export const MAX_EVENT_BUFFER = 100;
 const statsByKey = new Map<string, EndpointStats>();
 const eventBuffer: TelemetryEvent[] = [];
 
+/**
+ * Debug switch, driven by the host (config `debug: true/false`). `auto`
+ * defers to the `DSH_ORCHESTRATOR_DEBUG` environment variable; an explicit
+ * config value always wins over the environment.
+ */
+let debugMode: 'on' | 'off' | 'auto' = 'auto';
+
+/** Set the debug logging mode from the validated config. */
+export function setDebugLogging(enabled: boolean | undefined): void {
+  debugMode = enabled === true ? 'on' : enabled === false ? 'off' : 'auto';
+}
+
 function isDebugEnabled(): boolean {
+  if (debugMode === 'on') return true;
+  if (debugMode === 'off') return false;
   const flag = process.env['DSH_ORCHESTRATOR_DEBUG'];
   return flag === '1' || flag === 'true';
 }
@@ -142,4 +156,5 @@ export function getRecentEvents(limit: number = MAX_EVENT_BUFFER): TelemetryEven
 export function resetTelemetry(): void {
   statsByKey.clear();
   eventBuffer.length = 0;
+  debugMode = 'auto';
 }
