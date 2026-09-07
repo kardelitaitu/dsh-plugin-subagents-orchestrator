@@ -426,13 +426,27 @@ describe('fs.watch Debounce', () => {
       // handle; the assertions below still hold.
     }
 
-    // The settings file is gone with the directory: the next debounced
-    // reload legitimately resolves to "no config" - crash survival is the point.
-    await waitFor(() => getConfig() === null, 'deleted dir to clear the cache');
-    expect(getCachedEndpoints()).toEqual([]);
+    // The settings file AND its directory are gone: with the directory dead
+    // the fs.watch handle can never re-arm, so nothing would ever refresh
+    // the cache again - retention beats a permanent silent shutdown.
+    await sleep(WATCH_DEBOUNCE_MS + 200);
+    expect(getConfig()?.strategy).toBe('round-robin'); // last snapshot retained
+    expect(getCachedEndpoints()).toHaveLength(1);
 
     // The watcher lifecycle stays intact after the error path.
     expect(() => disposeWatcher()).not.toThrow();
+  });
+
+  it('should clear the cache when only the file is deleted but the directory survives', async () => {
+    initWatcher(testFile);
+    expect(getConfig()?.strategy).toBe('round-robin');
+
+    fs.unlinkSync(testFile);
+
+    // A living directory means a future file (or recreate) can be watched:
+    // the reload honestly reflects the missing file.
+    await waitFor(() => getConfig() === null, 'deleted file to clear the cache');
+    expect(getCachedEndpoints()).toEqual([]);
   });
 });
 
@@ -483,5 +497,39 @@ describe('Test State Isolation', () => {
       existsSpy.mockRestore();
       readSpy.mockRestore();
     }
+  });
+
+  it('should keep injected null authoritative when initWatcher runs afterwards', () => {
+    // Reproduces the real-settings leak: apply() calls initWatcher(), which
+    // used to reset the path and read the developer's ~/.dsh/settings.yaml
+    // right after a test injected null.
+    setConfigForTest(null);
+    initWatcher(testFile); // target dir does not exist, and must not be read
+
+    const existsSpy = vi.spyOn(fs, 'existsSync');
+    const readSpy = vi.spyOn(fs, 'readFileSync');
+    try {
+      expect(getConfig()).toBeNull();
+      expect(getCachedEndpoints()).toEqual([]);
+      expect(existsSpy).not.toHaveBeenCalled();
+      expect(readSpy).not.toHaveBeenCalled();
+    } finally {
+      existsSpy.mockRestore();
+      readSpy.mockRestore();
+    }
+  });
+
+  it('should not clobber an injected config via a scheduled watcher reload', async () => {
+    const injected: OrchestratorConfig = {
+      enabled: true,
+      strategy: 'weighted',
+      endpoints: [{ provider: 'p1', model: 'm1' }]
+    };
+    setConfigForTest(injected);
+    initWatcher(testFile); // previously started watching + scheduled a reload
+
+    await sleep(WATCH_DEBOUNCE_MS + 150);
+
+    expect(getConfig()).toBe(injected); // reload must not override the injection
   });
 });
