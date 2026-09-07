@@ -38,7 +38,8 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 - [ ] **Failover Notifications**:
   - Push subtle UI session notices or status messages when a subagent fails over to another provider.
 - [ ] **Per-Endpoint Latency & Token Metrics**:
-  - Track response latency and token throughput per subagent endpoint.
+  - [x] Failure-latency metrics per endpoint (request-to-failure span: count/total/max/last, plus `latencyMs` on failure events) — distinguishes instant refusals from long hangs.
+  - [ ] Success-side response latency and token throughput: the host dispatch layer exposes no request-completion event (`agent/request` builds the config, failures surface via `agent/request-error`), so success metrics need a host-side completion signal first.
 - [x] **Log Integration**:
   - Structured debug logging (one JSON line per routing event via `console.debug`), enabled by the config `debug` flag or `DSH_ORCHESTRATOR_DEBUG=1` — reachable through `dsh` CLI diagnostics.
 

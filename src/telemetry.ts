@@ -29,6 +29,8 @@ export interface TelemetryEvent {
   code?: string;
   /** Provider-derived cooldown hint in ms, when one was present. */
   hintMs?: number;
+  /** Request-to-failure span in ms, when a matching request start was seen. */
+  latencyMs?: number;
 }
 
 export interface EndpointStats {
@@ -45,6 +47,14 @@ export interface EndpointStats {
   cooldownHints: number;
   lastFailureAt: number | null;
   lastFailureCode: string | null;
+  /** Failure-latency samples recorded for this endpoint. */
+  latencySamples: number;
+  /** Sum of failure-latency samples (ms); divide by latencySamples for the mean. */
+  latencyTotalMs: number;
+  /** Longest observed failure latency (ms). */
+  latencyMaxMs: number;
+  /** Most recent failure latency (ms), or null before the first sample. */
+  lastLatencyMs: number | null;
 }
 
 /** Recent-event ring buffer size. Small on purpose: diagnostics, not an audit log. */
@@ -52,6 +62,15 @@ export const MAX_EVENT_BUFFER = 100;
 
 const statsByKey = new Map<string, EndpointStats>();
 const eventBuffer: TelemetryEvent[] = [];
+
+/**
+ * In-flight request starts per agent, for failure-latency attribution: the
+ * agent's endpoint at `agent/request` time and the timestamp. Failure latency
+ * is the request-to-failure span — instant refusals (rate limit, auth) vs.
+ * long hangs (timeout) — since the host dispatch layer exposes no
+ * request-completion event for success-side latency.
+ */
+const requestStarts = new Map<string, { endpoint: TelemetryEndpointRef; at: number }>();
 
 /**
  * Debug switch, driven by the host (config `debug: true/false`). `auto`
@@ -93,7 +112,11 @@ function ensureStats(endpoint: TelemetryEndpointRef): EndpointStats {
       failovers: 0,
       cooldownHints: 0,
       lastFailureAt: null,
-      lastFailureCode: null
+      lastFailureCode: null,
+      latencySamples: 0,
+      latencyTotalMs: 0,
+      latencyMaxMs: 0,
+      lastLatencyMs: null
     };
     statsByKey.set(key, entry);
   }
@@ -103,6 +126,7 @@ function ensureStats(endpoint: TelemetryEndpointRef): EndpointStats {
 /** Record a request observed routed to `endpoint` for `agentId`. */
 export function recordRequest(agentId: string, endpoint: TelemetryEndpointRef, now: number = Date.now()): void {
   ensureStats(endpoint).requests += 1;
+  requestStarts.set(agentId, { endpoint: { ...endpoint }, at: now });
   emit({ at: now, type: 'request', agentId, to: { ...endpoint } });
 }
 
@@ -119,7 +143,30 @@ export function recordFailure(
   if (hintMs !== undefined) entry.cooldownHints += 1;
   entry.lastFailureAt = now;
   entry.lastFailureCode = code;
-  emit({ at: now, type: 'failure', agentId, from: { ...endpoint }, code, ...(hintMs !== undefined ? { hintMs } : {}) });
+
+  // Failure latency: the span from the request build (recordRequest) to this
+  // failure. One sample per request — the start entry is consumed here, so a
+  // failure without a preceding request simply records no latency.
+  const start = requestStarts.get(agentId);
+  let latencyMs: number | undefined;
+  if (start) {
+    requestStarts.delete(agentId);
+    latencyMs = Math.max(0, now - start.at);
+    entry.latencySamples += 1;
+    entry.latencyTotalMs += latencyMs;
+    entry.latencyMaxMs = Math.max(entry.latencyMaxMs, latencyMs);
+    entry.lastLatencyMs = latencyMs;
+  }
+
+  emit({
+    at: now,
+    type: 'failure',
+    agentId,
+    from: { ...endpoint },
+    code,
+    ...(hintMs !== undefined ? { hintMs } : {}),
+    ...(latencyMs !== undefined ? { latencyMs } : {})
+  });
 }
 
 /** Record a failover transition `from -> to` for `agentId`. */
@@ -158,5 +205,6 @@ export function getRecentEvents(limit: number = MAX_EVENT_BUFFER): TelemetryEven
 export function resetTelemetry(): void {
   statsByKey.clear();
   eventBuffer.length = 0;
+  requestStarts.clear();
   debugMode = 'auto';
 }
