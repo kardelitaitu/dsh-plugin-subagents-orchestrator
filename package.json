@@ -4,6 +4,14 @@
   "description": "Multi-endpoint load distributor and intelligent failover orchestrator for DeepSeek Harness subagents",
   "author": "Adikara",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator/issues"
+  },
+  "homepage": "https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator#readme",
   "sideEffects": false,
   "engines": {
     "node": ">=20"
