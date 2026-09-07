@@ -29,7 +29,12 @@ export const FAILOVER_TRIGGER_CODES = [
   'SERVER',
   'TIMEOUT',
   'TRANSPORT',
-  'EMPTY_RESPONSE'
+  'EMPTY_RESPONSE',
+  // Per-provider credential failures (dsh-llm throws these with the provider
+  // route in the message): a dead key on one account does not implicate the
+  // other pool entries, so switching accounts is exactly the remedy.
+  'INVALID_CREDENTIAL',
+  'MISSING_CREDENTIAL'
 ];
 
 export const WRAPPED = Symbol.for('dsh-plugin-subagents-orchestrator.wrapped');
@@ -219,7 +224,9 @@ export function apply(ctx: CordisContext): void {
       const config = getConfig();
       // A disabled plugin is fully inert: `failover: true` alone must not
       // resurrect failover handling for agents attributed before the disable.
-      if (!config || config.enabled === false || config.failover !== true) return next();
+      // Failover defaults to on (README contract): only an explicit
+      // `failover: false` disables it.
+      if (!config || config.enabled === false || config.failover === false) return next();
       refreshTelemetryDebug();
 
       const endpoints = getCachedEndpoints();
@@ -382,11 +389,11 @@ export function apply(ctx: CordisContext): void {
       return seed;
     }
 
-    // Orchestration turned off (or failover disabled) while a retry was
-    // pending: drop the pending rewrite instead of applying it behind the
-    // user's back. Requests pass through untouched from here on.
+    // Orchestration turned off (or failover explicitly disabled) while a
+    // retry was pending: drop the pending rewrite instead of applying it
+    // behind the user's back. Requests pass through untouched from here on.
     const liveConfig = getConfig();
-    if (!liveConfig || liveConfig.enabled === false || liveConfig.failover !== true) {
+    if (!liveConfig || liveConfig.enabled === false || liveConfig.failover === false) {
       pendingFailovers.delete(agent.id);
       return next();
     }
