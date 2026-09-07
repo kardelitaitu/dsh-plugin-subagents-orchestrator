@@ -1,0 +1,19 @@
+{
+  "name": "dsh-plugin-subagents-orchestrator",
+  "version": "1.0.0",
+  "description": "Multi-endpoint load distributor and intelligent failover orchestrator for DeepSeek Harness subagents",
+  "author": "Adikara",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

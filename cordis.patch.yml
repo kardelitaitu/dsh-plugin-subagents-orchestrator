@@ -1,0 +1,4 @@
+# Subagents Orchestrator bundle patch
+- insert:
+    - id: dsh-plugin-subagents-orchestrator
+      name: dsh-plugin-subagents-orchestrator
