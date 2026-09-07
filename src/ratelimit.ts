@@ -27,12 +27,15 @@ function toEpochMs(value: number): number | null {
 }
 
 /**
- * Derive an exact cooldown window (ms) from provider rate-limit headers.
+ * Derive an exact cooldown window (ms) from a provider failure.
  *
  * Understood signals, in priority order:
- * 1. `Retry-After`  — delta seconds, or an HTTP-date.
- * 2. `x-ratelimit-reset` / `ratelimit-reset` — delta seconds, epoch seconds,
- *    or epoch milliseconds (disambiguated by magnitude).
+ * 0. `failure.providerRetryAfterMs` — already parsed and validated by the
+ *    host's LLM layer (dsh-llm) from the provider's `retry-after` header;
+ *    taken as-is when present and within the cap.
+ * 1. `Retry-After` header — delta seconds, or an HTTP-date.
+ * 2. `x-ratelimit-reset` / `ratelimit-reset` headers — delta seconds, epoch
+ *    seconds, or epoch milliseconds (disambiguated by magnitude).
  *
  * @returns cooldown in ms clamped to `[0, MAX_HINT_COOLDOWN_MS]`, or `null`
  *          when the failure carries no usable rate-limit information.
@@ -42,6 +45,14 @@ export function extractCooldownHintMs(
   now: number = Date.now()
 ): number | null {
   if (!failure) return null;
+
+  // Host-parsed hint (dsh-llm validates it as a positive finite ms value).
+  const hostHint = failure.providerRetryAfterMs;
+  if (typeof hostHint === 'number' && Number.isFinite(hostHint) && hostHint > 0) {
+    if (hostHint <= MAX_HINT_COOLDOWN_MS) return hostHint;
+    return MAX_HINT_COOLDOWN_MS;
+  }
+
   const response = failure.response as { headers?: Record<string, string> } | undefined;
   const sources = [failure.headers, response?.headers];
 

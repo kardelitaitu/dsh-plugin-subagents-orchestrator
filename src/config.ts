@@ -105,6 +105,9 @@ export function parseConfigDocument(doc: unknown): OrchestratorConfig | null {
   // (health.ts); the schema only enforces types.
   if (isFiniteNumber(section['cooldownMs'])) config.cooldownMs = section['cooldownMs'];
   if (isFiniteNumber(section['maxFailures'])) config.maxFailures = section['maxFailures'];
+  if (isFiniteNumber(section['intervalMinMs'])) config.intervalMinMs = section['intervalMinMs'];
+  if (isFiniteNumber(section['intervalMaxMs'])) config.intervalMaxMs = section['intervalMaxMs'];
+  if (isFiniteNumber(section['maxRetries'])) config.maxRetries = section['maxRetries'];
   if (typeof section['debug'] === 'boolean') config.debug = section['debug'];
 
   if (Array.isArray(section['endpoints'])) {
@@ -140,7 +143,20 @@ export function extractEndpoints(config: OrchestratorConfig | null): Endpoint[] 
 
 export function reloadConfig(): void {
   if (isCustomTestConfig) return;
-  cachedConfig = parseConfigFile(activeFilePath);
+  const parsed = parseConfigFile(activeFilePath);
+
+  // Snapshot retention: when the settings file cannot be read *and* its
+  // directory is gone, the fs.watch handle is dead too — nothing would ever
+  // re-arm the watcher or refresh this cache until the host restarts, so
+  // degrading to "no config" would silently disable orchestration forever.
+  // Keep serving the last known good snapshot in that case. A deleted file
+  // in a living directory is handled normally (clears the cache).
+  if (parsed === null && cachedConfig !== null && !fs.existsSync(path.dirname(activeFilePath))) {
+    hasLoadedFromDisk = true;
+    return;
+  }
+
+  cachedConfig = parsed;
   cachedEndpoints = extractEndpoints(cachedConfig);
   hasLoadedFromDisk = true;
 }
@@ -178,6 +194,11 @@ function scheduleReload(): void {
 
 export function initWatcher(filePath: string = DEFAULT_SETTINGS_PATH): void {
   disposeWatcher();
+  if (isCustomTestConfig) {
+    // Test-injected state owns the cache: never read the settings file and
+    // never watch the developer's real ~/.dsh directory from a test.
+    return;
+  }
   activeFilePath = filePath;
   reloadConfig();
 
@@ -215,12 +236,13 @@ export function disposeWatcher(): void {
 }
 
 export function setConfigForTest(config: OrchestratorConfig | null): void {
-  isCustomTestConfig = config !== null;
+  // Any injected state — including null — owns the cache until reset:
+  // reloadConfig()/initWatcher() must never clobber it from disk (that would
+  // silently read the developer's real ~/.dsh/settings.yaml into a test,
+  // e.g. via apply() -> initWatcher() right after setConfigForTest(null)).
+  isCustomTestConfig = true;
   cachedConfig = config;
   cachedEndpoints = extractEndpoints(config);
-  // Injected state is authoritative: later getConfig() calls must never fall
-  // back to a disk probe — not even when `null` was injected (which would
-  // otherwise read the developer's real ~/.dsh/settings.yaml).
   hasLoadedFromDisk = true;
 }
 
