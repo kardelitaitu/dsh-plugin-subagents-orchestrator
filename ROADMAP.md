@@ -15,14 +15,14 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 ---
 
-## 🚀 Phase 2: Dynamic Health Tracking & Circuit Breaker
+## 🚀 Phase 2: Dynamic Health Tracking & Circuit Breaker (Completed ✅)
 
-- [ ] **Dynamic Endpoint Health Tracking**:
+- [x] **Dynamic Endpoint Health Tracking**:
   - Automatically mark endpoints unhealthy on consecutive failures.
   - Apply temporary backoff cooldowns (e.g., 60s) before returning them to rotation.
-- [ ] **Adaptive Load Weighting**:
+- [x] **Adaptive Load Weighting**:
   - Support priority weights (`weight: 1..10`) per endpoint for tiered provider setups.
-- [ ] **Rate Limit Header Parsing**:
+- [x] **Rate Limit Header Parsing**:
   - Parse provider rate limit responses (e.g., `Retry-After`, `x-ratelimit-reset`) to set exact cooldown windows.
 
 ---

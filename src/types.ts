@@ -35,6 +35,8 @@ export interface Agent {
 export interface FailureInfo {
   code: string;
   message?: string;
+  /** Raw response headers from the failed provider call, when available. */
+  headers?: Record<string, string>;
   [key: string]: unknown;
 }
 
@@ -79,4 +81,12 @@ export interface CordisContext {
 export interface FailoverState {
   count: number;
   index: number;
+}
+
+/** Provider seed produced by the host for an agent request (`agent/request` event). */
+export interface RequestSeed {
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
+  [key: string]: unknown;
 }

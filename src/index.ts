@@ -5,7 +5,8 @@ import type {
   RequestErrorPayload,
   Agent,
   FailoverState,
-  Endpoint
+  Endpoint,
+  RequestSeed
 } from './types.js';
 import {
   getConfig,
@@ -15,6 +16,7 @@ import {
 } from './config.js';
 import { pickNextEndpoint } from './balancer.js';
 import { defaultCircuitBreaker } from './health.js';
+import { extractCooldownHintMs } from './ratelimit.js';
 
 export const name = 'dsh-plugin-subagents-orchestrator';
 
@@ -116,20 +118,40 @@ export function apply(ctx: CordisContext): void {
     if (!isSubagent(agent)) return next();
     if (!failure || !FAILOVER_TRIGGER_CODES.includes(failure.code)) return next();
 
-    // Trip circuit breaker on failure
+    // Trip circuit breaker on failure. A provider cooldown hint
+    // (Retry-After / x-ratelimit-reset) trips the endpoint immediately for
+    // exactly that window; otherwise the consecutive-failure threshold and
+    // the configured cooldown apply.
     const currentEndpoint = activeEndpoints.get(agent.id);
     if (currentEndpoint) {
+      const hintMs = extractCooldownHintMs(failure);
       defaultCircuitBreaker.recordFailure(
         currentEndpoint,
-        config.maxFailures || 3,
-        config.cooldownMs || 60000
+        hintMs !== null ? 1 : config.maxFailures || 3,
+        hintMs ?? config.cooldownMs ?? 60000
       );
     }
 
     const current = pendingFailovers.get(agent.id) || { count: 0, index: 0 };
     if (current.count >= endpoints.length - 1) return next();
 
-    const nextIndex = (current.index + 1) % endpoints.length;
+    // Advance to the next candidate, skipping endpoints the breaker has tripped
+    // (unless every remaining candidate is tripped — degraded attempts still
+    // beat a hard stall).
+    let nextIndex = -1;
+    for (let step = 1; step <= endpoints.length - 1; step++) {
+      const candidateIndex = (current.index + step) % endpoints.length;
+      const candidate = endpoints[candidateIndex];
+      const isCurrent = currentEndpoint !== undefined && defaultCircuitBreaker.getEndpointKey(candidate) === defaultCircuitBreaker.getEndpointKey(currentEndpoint);
+      if (isCurrent) continue;
+      if (defaultCircuitBreaker.isHealthy(candidate)) {
+        nextIndex = candidateIndex;
+        break;
+      }
+      if (nextIndex === -1) nextIndex = candidateIndex;
+    }
+    if (nextIndex === -1) return next();
+
     pendingFailovers.set(agent.id, {
       count: current.count + 1,
       index: nextIndex
@@ -144,16 +166,28 @@ export function apply(ctx: CordisContext): void {
     if (!isSubagent(agent)) return next();
 
     const current = pendingFailovers.get(agent.id);
-    if (!current) return next();
 
-    const config = getConfig();
+    if (!current) {
+      // Pass-through request: remember the assigned endpoint so the breaker
+      // can attribute this subagent's failures even before any failover.
+      const seed = (await next()) as RequestSeed | null | undefined;
+      if (seed && typeof seed.provider === 'string' && typeof seed.model === 'string') {
+        activeEndpoints.set(agent.id, {
+          provider: seed.provider,
+          model: seed.model,
+          ...(typeof seed.reasoningEffort === 'string' ? { reasoningEffort: seed.reasoningEffort } : {})
+        });
+      }
+      return seed;
+    }
+
     const endpoints = getCachedEndpoints();
     const target = endpoints[current.index];
     if (!target) return next();
 
     activeEndpoints.set(agent.id, target);
 
-    const seed = await next();
+    const seed = (await next()) as RequestSeed | null | undefined;
     if (!seed) return seed;
 
     const { reasoningEffort: _effort, ...rest } = seed;

@@ -10,7 +10,7 @@
 When building complex projects with DeepSeek Harness, tasks are often delegated to multiple concurrent subagents (e.g. `subagent`, `subagent_fork`). Without orchestration, all subagents default to the parent session model endpoint, which rapidly exhausts rate limits, triggers concurrency throttles, or causes overall session failure when a provider experiences transient errors.
 
 `dsh-plugin-subagents-orchestrator` is a lightweight, host-plane Cordis plugin that intercepts all subagent creations and:
-1. **Distributes subagent workloads** across multiple LLM provider accounts/endpoints using **round-robin** or **random** strategies.
+1. **Distributes subagent workloads** across multiple LLM provider accounts/endpoints using **round-robin**, **random**, or **weighted** strategies.
 2. **Provides automated, resilient failover**: If a subagent encounters a rate limit (`RATE_LIMIT`), quota exhaustion (`QUOTA`), server error (`SERVER`), timeout (`TIMEOUT`), or transport issue (`TRANSPORT`), the plugin dynamically retries that subagent on the next configured endpoint in your pool without failing the main conversation.
 3. **Zero UI interference**: Runs entirely on the host plane, meaning zero risk of client module crashes, web boot stalls, or frontend incompatibilities.
 
@@ -20,6 +20,8 @@ When building complex projects with DeepSeek Harness, tasks are often delegated 
 
 - **Multi-Endpoint Load Balancing**: Evenly spreads subagent calls across different provider keys and endpoints (e.g. `b-ai-1`, `b-ai-2`, `b-ai-3`, `b-ai-4`, `b-ai-5`).
 - **Subagent-Only Error Failover**: Intercepts `agent/request-error` specifically for sessions where `origin === "subagent"`, preserving the main agent session integrity.
+- **Circuit-Breaker Health Tracking**: Endpoints that fail repeatedly are pulled from rotation for a cooldown window, then recover on probation — with graceful degradation to the full pool if every endpoint is down.
+- **Rate-Limit-Aware Cooldowns**: When a provider answers with `Retry-After` / `x-ratelimit-reset` headers, the endpoint trips immediately for exactly that window (capped at 15 minutes).
 - **Hot-Reloadable Configuration**: Reads settings directly from `~/.dsh/settings.yaml` on the fly - changes take effect on the very next subagent call without restarting DSH.
 - **Respects Explicit Overrides**: If a specific subagent call explicitly requests a model/provider, the orchestrator respects the caller intent and skips routing.
 - **Native Cordis Integration**: Built on Cordis lifecycle hooks and wraps `ctx.subagents.start()` and `ctx.subagents.startContinuable()`.
@@ -33,11 +35,14 @@ Add the `subagents-orchestrator` section to your `~/.dsh/settings.yaml`:
 ```yaml
 subagents-orchestrator:
   enabled: true
-  strategy: round-robin   # "round-robin" or "random"
+  strategy: round-robin   # "round-robin" | "random" | "weighted"
   failover: true          # Automatically switch endpoint on failure
+  cooldownMs: 60000       # Cooldown once an endpoint trips (provider hints override)
+  maxFailures: 3          # Consecutive failures before an endpoint trips
   endpoints:
     - provider: b-ai-1-adikaradwiatmaja
       model: glm-5.3-flash
+      weight: 2           # only used by the "weighted" strategy
     - provider: b-ai-2-atmajacreative
       model: glm-5.3-flash
     - provider: b-ai-3-gimoruru
@@ -53,9 +58,11 @@ subagents-orchestrator:
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | `true` | Enable or disable subagent orchestration |
-| `strategy` | `string` | `"round-robin"` | Distribution algorithm: `"round-robin"` or `"random"` |
+| `strategy` | `string` | `"round-robin"` | Distribution algorithm: `"round-robin"`, `"random"`, or `"weighted"` |
 | `failover` | `boolean` | `true` | Automatically failover to next endpoint on rate limits/errors |
-| `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort? }` endpoints |
+| `cooldownMs` | `number` | `60000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
+| `maxFailures` | `number` | `3` | Consecutive failures before an endpoint trips |
+| `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight? }` endpoints (`weight` feeds the `"weighted"` strategy) |
 
 ---
 
@@ -63,8 +70,15 @@ subagents-orchestrator:
 
 ```
 /
-├── lib/
-│   └── index.js            # Core host-plane plugin & Cordis hooks
+├── src/
+│   ├── index.ts            # Plugin entry: Cordis hooks, request wrap & failover wiring
+│   ├── config.ts           # ~/.dsh/settings.yaml hot-reload cache + file watcher
+│   ├── balancer.ts         # round-robin / random / weighted endpoint picking
+│   ├── health.ts           # per-endpoint circuit breaker (closed/open/half-open)
+│   ├── ratelimit.ts        # Retry-After / x-ratelimit-reset cooldown parsing
+│   └── types.ts            # Shared TypeScript contracts
+├── tests/                  # Vitest suite (unit + plugin behavior, mock Cordis context)
+├── lib/                    # Build output (tsup: index.js + index.d.ts + sourcemap)
 ├── cordis.patch.yml        # DSH Cordis profile patch definition
 ├── package.json            # NPM package manifest
 ├── README.md               # Project documentation

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { apply, isSubagent } from '../src/index.js';
 import { setConfigForTest, disposeWatcher } from '../src/config.js';
+import { defaultCircuitBreaker } from '../src/health.js';
 import { MockCordisContext, createMockAgent } from './mocks/cordis.js';
 
 describe('Cordis Subagents Orchestrator Plugin', () => {
@@ -14,6 +15,7 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     ctx.dispose();
     disposeWatcher();
     setConfigForTest(null);
+    defaultCircuitBreaker.clear();
   });
 
   it('correctly identifies subagents by session header origin', () => {
@@ -139,5 +141,85 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     );
 
     expect(errorResult).toEqual({ handledByDefault: true });
+  });
+
+  it('attributes the first failure to the initially assigned endpoint', async () => {
+    setConfigForTest({
+      enabled: true,
+      failover: true,
+      endpoints: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' }
+      ]
+    });
+
+    apply(ctx);
+
+    const subagent = createMockAgent('sub-attr-1', 'subagent');
+
+    // Pass-through request records the endpoint the host assigned
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+
+    await ctx.emit('agent/request-error', {
+      agent: subagent,
+      failure: { code: 'SERVER' }
+    });
+
+    expect(defaultCircuitBreaker.getStatus({ provider: 'p1', model: 'm1' }).consecutiveFailures).toBe(1);
+  });
+
+  it('trips an endpoint immediately when the provider sends Retry-After', async () => {
+    setConfigForTest({
+      enabled: true,
+      failover: true,
+      endpoints: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' }
+      ]
+    });
+
+    apply(ctx);
+
+    const subagent = createMockAgent('sub-hint-1', 'subagent');
+
+    // Assign p1 via a pass-through request
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+
+    const errorResult = await ctx.emit('agent/request-error', {
+      agent: subagent,
+      failure: { code: 'RATE_LIMIT', headers: { 'Retry-After': '30' } }
+    });
+    expect(errorResult).toEqual({ kind: 'retry' });
+    expect(defaultCircuitBreaker.isHealthy({ provider: 'p1', model: 'm1' })).toBe(false);
+
+    // New subagent routing must skip the tripped endpoint
+    const res: any = await ctx.subagents.start!('worker-after-hint', {});
+    expect(res.request.agentOptions).toEqual({ provider: 'p2', model: 'm2' });
+  });
+
+  it('skips a tripped endpoint when choosing the failover target', async () => {
+    setConfigForTest({
+      enabled: true,
+      failover: true,
+      endpoints: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' },
+        { provider: 'p3', model: 'm3' }
+      ]
+    });
+
+    apply(ctx);
+
+    // p2 is already down before the failure cascade starts
+    defaultCircuitBreaker.recordFailure({ provider: 'p2', model: 'm2' }, 1, 60000);
+
+    const subagent = createMockAgent('sub-skip-1', 'subagent');
+
+    await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'SERVER' } });
+    const retry: any = await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+
+    // p2 is tripped, so the failover target must be p3, not p2
+    expect(retry.provider).toBe('p3');
+    expect(retry.model).toBe('m3');
   });
 });
