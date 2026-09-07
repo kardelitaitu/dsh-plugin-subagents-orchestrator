@@ -22,6 +22,9 @@ When building complex projects with DeepSeek Harness, tasks are often delegated 
 - **Subagent-Only Error Failover**: Intercepts `agent/request-error` specifically for sessions where `origin === "subagent"`, preserving the main agent session integrity.
 - **Circuit-Breaker Health Tracking**: Endpoints that fail repeatedly are pulled from rotation for a cooldown window, then recover on probation — with graceful degradation to the full pool if every endpoint is down.
 - **Rate-Limit-Aware Cooldowns**: When a provider answers with `Retry-After` / `x-ratelimit-reset` headers, the endpoint trips immediately for exactly that window (capped at 15 minutes).
+- **Endpoint Toggles**: Set `enabled: false` on an endpoint to park it (kept in config, excluded from routing, failover and telemetry) without deleting it.
+- **Structured Telemetry**: Optional per-endpoint routing/failure/failover event stream with recent-event and per-endpoint-stat snapshots; enable via the config `debug` flag or `DSH_ORCHESTRATOR_DEBUG=1`.
+- **Zero-Disk-I/O Config Cache**: Settings are parsed once into memory and served from there; a debounced `fs.watch` on `~/.dsh/settings.yaml` hot-reloads the cache, so reads are allocation-cheap and never hit the disk.
 - **Hot-Reloadable Configuration**: Reads settings directly from `~/.dsh/settings.yaml` on the fly - changes take effect on the very next subagent call without restarting DSH.
 - **Respects Explicit Overrides**: If a specific subagent call explicitly requests a model/provider, the orchestrator respects the caller intent and skips routing.
 - **Native Cordis Integration**: Built on Cordis lifecycle hooks and wraps `ctx.subagents.start()` and `ctx.subagents.startContinuable()`.
@@ -35,21 +38,26 @@ Add the `subagents-orchestrator` section to your `~/.dsh/settings.yaml`:
 ```yaml
 subagents-orchestrator:
   enabled: true
-  strategy: round-robin   # "round-robin" | "random" | "weighted"
-  failover: true          # Automatically switch endpoint on failure
-  cooldownMs: 60000       # Cooldown once an endpoint trips (provider hints override)
-  maxFailures: 3          # Consecutive failures before an endpoint trips
+  strategy: round-robin    # "round-robin" | "random" | "weighted"
+  failover: true           # Automatically switch endpoint on failure
+  cooldownMs: 120000       # Cooldown once an endpoint trips (provider hints override)
+  maxFailures: 20          # Consecutive failures before an endpoint trips
+  debug: false             # Emit structured telemetry lines for every routing event
+
+  # endpoints and models should be already on the DSH profile
   endpoints:
-    - provider: b-ai-1-adikaradwiatmaja
+    - provider: provider-5
       model: glm-5.3-flash
-      weight: 2           # only used by the "weighted" strategy
-    - provider: b-ai-2-atmajacreative
+      weight: 3           # only used by the "weighted" strategy
+      enabled: true       # set to false to park an endpoint without deleting it
+    - provider: provider-4
       model: glm-5.3-flash
-    - provider: b-ai-3-gimoruru
+      weight: 1           # only used by the "weighted" strategy
+    - provider: provider-3
       model: glm-5.3-flash
-    - provider: b-ai-4-fannyxborg6
+    - provider: provider-2
       model: glm-5.3-flash
-    - provider: b-ai-5-kardelitaitu2
+    - provider: provider-1
       model: glm-5.3-flash
 ```
 
@@ -62,7 +70,8 @@ subagents-orchestrator:
 | `failover` | `boolean` | `true` | Automatically failover to next endpoint on rate limits/errors |
 | `cooldownMs` | `number` | `60000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
 | `maxFailures` | `number` | `3` | Consecutive failures before an endpoint trips |
-| `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight? }` endpoints (`weight` feeds the `"weighted"` strategy) |
+| `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |
+| `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight?, enabled? }` endpoints (`weight` feeds the `"weighted"` strategy; `enabled: false` parks an endpoint — it stays in the config but is excluded from routing, failover targets and telemetry) |
 
 ---
 
@@ -72,22 +81,48 @@ subagents-orchestrator:
 /
 ├── src/
 │   ├── index.ts            # Plugin entry: Cordis hooks, request wrap & failover wiring
-│   ├── config.ts           # ~/.dsh/settings.yaml hot-reload cache + file watcher
+│   ├── config.ts           # ~/.dsh/settings.yaml zero-I/O cache, schema validation + debounced watcher
 │   ├── balancer.ts         # round-robin / random / weighted endpoint picking
 │   ├── health.ts           # per-endpoint circuit breaker (closed/open/half-open)
 │   ├── ratelimit.ts        # Retry-After / x-ratelimit-reset cooldown parsing
+│   ├── telemetry.ts        # per-endpoint routing/failure/failover stats + debug event stream
 │   └── types.ts            # Shared TypeScript contracts
 ├── tests/                  # Vitest suite (unit + plugin behavior, mock Cordis context)
 ├── lib/                    # Build output (tsup: index.js + index.d.ts + sourcemap)
 ├── cordis.patch.yml        # DSH Cordis profile patch definition
 ├── package.json            # NPM package manifest
+├── CHANGELOG.md            # Release notes (Keep a Changelog)
 ├── README.md               # Project documentation
 └── ROADMAP.md              # Future development roadmap
 ```
 
 ---
 
-## Installation into DSH
+## Install
+
+Install from the npm registry:
+
+```bash
+npm install dsh-plugin-subagents-orchestrator
+```
+
+Or via the DSH plugin command (equivalent; it goes through npm internally):
+
+```bash
+dsh plugin --profile desktop add dsh-plugin-subagents-orchestrator
+```
+
+`dsh plugin add` is the preferred route: besides installing the dependency into the profile, it automatically registers the plugin in the profile bundle stack (`dsh.profile.bundles`) - the package declares `dsh.bundle`, so no manual manifest editing is needed. A bare `npm install` (run inside your profile directory) only installs the dependency; you must add the package to `dsh.profile.bundles` yourself, as shown below.
+
+You can also install straight from a GitHub repository:
+
+```bash
+dsh plugin --profile web add github:username/repository-name
+```
+
+Replace `username/repository-name` with this plugin's GitHub owner/repo, and `--profile` with the profile you boot. If pnpm asks to allow build scripts during a git-hosted install, add the exact key it prints under `allowBuilds` in the profile's `pnpm-workspace.yaml` and re-run the command.
+
+### Install from source (local development)
 
 Add as a local dependency in your profile (`~/.dsh/profiles/desktop/package.json`):
 
@@ -112,6 +147,8 @@ Run `pnpm install` in your profile directory:
 cd ~/.dsh/profiles/desktop
 pnpm install
 ```
+
+This manual route is the only one that needs the hand-edited `dsh.profile.bundles` registration - the `dsh plugin add` commands above keep the bundle stack in sync automatically.
 
 ---
 
