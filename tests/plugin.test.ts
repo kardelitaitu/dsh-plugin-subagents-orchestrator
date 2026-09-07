@@ -89,6 +89,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -98,6 +101,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     apply(ctx);
 
     const subagent = createMockAgent('sub-test-1', 'subagent');
+
+    // The host assigns p1 before the request can fail (real waterfall order).
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
 
     // Simulate error event
     const errorResult = await ctx.emit('agent/request-error', {
@@ -123,6 +129,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -149,6 +157,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -174,6 +184,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -203,6 +215,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' },
@@ -217,6 +232,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
 
     const subagent = createMockAgent('sub-skip-1', 'subagent');
 
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
+
     await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'SERVER' } });
     const retry: any = await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
 
@@ -229,6 +247,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -357,6 +377,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -385,6 +407,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -440,6 +464,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -447,6 +473,11 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     });
 
     apply(ctx);
+
+    const subagent = createMockAgent('sub-veto-1', 'subagent');
+
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
 
     // A dsh-llm-retry-style listener registered AFTER the orchestrator: in the
     // cordis waterfall the orchestrator runs outermost-first, and a retry it
@@ -460,7 +491,7 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
 
     const result = await ctx.emit(
       'agent/request-error',
-      { agent: createMockAgent('sub-veto-1', 'subagent'), failure: { code: 'RATE_LIMIT' } },
+      { agent: subagent, failure: { code: 'RATE_LIMIT' } },
       () => null
     );
 
@@ -472,6 +503,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' },
@@ -534,6 +568,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -543,6 +580,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     apply(ctx);
 
     const subagent = createMockAgent('sub-reset-1', 'subagent');
+
+    // The host assigned p1 before the first failure.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
 
     // First lifecycle: one failover consumes the entire budget.
     expect(
@@ -559,7 +599,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     // The agent settles and is disposed; the host may restart the same id.
     await ctx.emit('agent/disposed', { agent: subagent });
 
-    // Fresh lifecycle: failover works again from a clean budget.
+    // Fresh lifecycle: the host assigns p1 again, then failover works again
+    // from a clean budget.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
     expect(
       await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'SERVER' } }, () => null)
     ).toEqual({ kind: 'retry' });
@@ -571,6 +613,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -580,6 +625,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     apply(ctx);
 
     const subagent = createMockAgent('sub-effort-1', 'subagent');
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
     await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'RATE_LIMIT' } }, () => null);
 
     // Mirrors dsh-agent's own agent/request listener: the inherited effort is
@@ -598,6 +645,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2', reasoningEffort: 'low' }
@@ -607,6 +657,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     apply(ctx);
 
     const subagent = createMockAgent('sub-effort-2', 'subagent');
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
     await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'RATE_LIMIT' } }, () => null);
 
     const retried: any = await ctx.emit(
@@ -622,6 +674,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -631,6 +686,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     apply(ctx);
 
     const subagent = createMockAgent('sub-nullseed-1', 'subagent');
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
     expect(
       await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'RATE_LIMIT' } }, () => null)
     ).toEqual({ kind: 'retry' });
@@ -647,6 +704,9 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' },
@@ -657,6 +717,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     apply(ctx);
 
     const subagent = createMockAgent('sub-shrink-1', 'subagent');
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
     expect(
       await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'RATE_LIMIT' } }, () => null)
     ).toEqual({ kind: 'retry' });
@@ -696,6 +758,8 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }

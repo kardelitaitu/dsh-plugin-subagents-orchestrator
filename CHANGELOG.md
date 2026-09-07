@@ -8,6 +8,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Same-endpoint retry budget (`maxRetries`, default 20): an eligible failure is
+  first retried on the CURRENT endpoint with a randomized 3-5s pause
+  (`intervalMinMs`/`intervalMaxMs`), and only then fails over to the next pool
+  entry — each fallback endpoint gets a fresh budget. The budget is scoped to
+  the failed (turn, step), a provider `Retry-After` hint fails over
+  immediately instead of burning retries, and failover targets skip tripped
+  endpoints as before.
 - `weighted` routing strategy with per-endpoint `weight`.
 - Per-endpoint circuit breaker (`health.ts`): consecutive-failure tripping,
   cooldown windows, probationary recovery, graceful degradation when every

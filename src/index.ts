@@ -59,6 +59,20 @@ export function resolveRetryDelayMs(
   return min + random() * (cappedMax - min);
 }
 
+/** Same-endpoint retry budget before failing over to the next pool entry. */
+export const DEFAULT_MAX_RETRIES = 20;
+
+/**
+ * Resolve the per-endpoint same-endpoint retry budget.
+ *
+ * Defaults to 20 retries. Non-finite or negative values fall back to the
+ * default; a valid value is floored to a whole retry count.
+ */
+export function resolveMaxRetries(config: OrchestratorConfig | null | undefined): number {
+  const valid = typeof config?.maxRetries === 'number' && Number.isFinite(config.maxRetries) && config.maxRetries >= 0;
+  return Math.floor(valid ? config!.maxRetries! : DEFAULT_MAX_RETRIES);
+}
+
 export function isSubagent(agent: Agent | null | undefined): boolean {
   return Boolean(agent && agent.session?.header?.origin === 'subagent');
 }
@@ -74,6 +88,14 @@ export function apply(ctx: CordisContext): void {
   }
   const activeRetryWaits = new Set<RetryWait>();
   let lifetimeDisposed = false;
+  /** Same-endpoint retry accounting for one agent's failed (turn, step). */
+  interface RetryIncident {
+    endpointKey: string;
+    turn: unknown;
+    step: unknown;
+    retries: number;
+  }
+  const retryIncidents = new Map<string, RetryIncident>();
 
   // Start zero-latency in-memory config cache & file watcher
   initWatcher();
@@ -190,11 +212,14 @@ export function apply(ctx: CordisContext): void {
     });
   });
 
-  // 2. Multi-endpoint automatic failover on connection/rate-limit failure
+  // 2. Same-endpoint retry budget, then multi-endpoint automatic failover on
+  //    connection/rate-limit failure.
   const disposeRequestError = ctx.on('agent/request-error', async (payload: RequestErrorPayload, next: () => any): Promise<RequestErrorAction> => {
     try {
       const config = getConfig();
-      if (!config || config.failover !== true) return next();
+      // A disabled plugin is fully inert: `failover: true` alone must not
+      // resurrect failover handling for agents attributed before the disable.
+      if (!config || config.enabled === false || config.failover !== true) return next();
       refreshTelemetryDebug();
 
       const endpoints = getCachedEndpoints();
@@ -205,27 +230,71 @@ export function apply(ctx: CordisContext): void {
       if (!isSubagent(agent)) return next();
       if (!failure || !FAILOVER_TRIGGER_CODES.includes(failure.code)) return next();
 
+      // Attribution: the host always dispatches `agent/request` (recorded by
+      // the pass-through listener above) before any request can fail, so an
+      // unattributed error leaves us unable to count the endpoint's retries
+      // or pick a sensible next fallback — defer to the host instead.
+      const currentEndpoint = activeEndpoints.get(agent.id);
+      if (!currentEndpoint) return next();
+      const endpointKey = defaultCircuitBreaker.getEndpointKey(currentEndpoint);
+
       // Trip circuit breaker on failure. A provider cooldown hint
       // (Retry-After / x-ratelimit-reset, host-parsed when available) trips
       // the endpoint immediately for exactly that window; otherwise the
       // consecutive-failure threshold and the configured cooldown apply.
-      const currentEndpoint = activeEndpoints.get(agent.id);
-      if (currentEndpoint) {
-        const hintMs = extractCooldownHintMs(failure);
-        defaultCircuitBreaker.recordFailure(
-          currentEndpoint,
-          hintMs !== null ? 1 : config.maxFailures || 3,
-          hintMs ?? config.cooldownMs ?? 60000
-        );
-        recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
+      const hintMs = extractCooldownHintMs(failure);
+      defaultCircuitBreaker.recordFailure(
+        currentEndpoint,
+        hintMs !== null ? 1 : config.maxFailures || 3,
+        hintMs ?? config.cooldownMs ?? 60000
+      );
+      recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
+
+      // Same-endpoint retry budget: retry the CURRENT endpoint up to
+      // `maxRetries` times (default 20) with the configured 3-5s pacing
+      // before considering a failover. The count is scoped to the failed
+      // (turn, step) — a later successful step resets it — and to the
+      // endpoint key, so every failover target starts with a fresh budget.
+      //
+      // A provider cooldown hint is the exception: the endpoint is tripped
+      // for exactly the window the provider asked for, so pacing 3-5s
+      // retries against it is futile — fail over immediately instead.
+      if (hintMs === null) {
+        const incident = retryIncidents.get(agent.id);
+        const sameIncident = incident !== undefined
+          && incident.endpointKey === endpointKey
+          && incident.turn === payload.turn
+          && incident.step === payload.step;
+        const retries = sameIncident ? incident.retries + 1 : 1;
+        retryIncidents.set(agent.id, {
+          endpointKey,
+          turn: payload.turn,
+          step: payload.step,
+          retries
+        });
+
+        if (retries <= resolveMaxRetries(config)) {
+          // Pacing: hold the retry decision for the configured interval
+          // window so the provider's rate-limit window can drain before the
+          // next attempt on this endpoint.
+          await delayRetryWait(signal, resolveRetryDelayMs(config));
+          if (lifetimeDisposed) retryIncidents.delete(agent.id);
+          return { kind: 'retry' };
+        }
       }
 
-      const current = pendingFailovers.get(agent.id) || { count: 0, index: 0 };
+      // Retry budget exhausted (or provider-hinted trip): advance to the
+      // next fallback endpoint, skipping endpoints the breaker has tripped
+      // (unless every remaining candidate is tripped — degraded attempts
+      // still beat a hard stall).
+      const currentIndex = endpoints.findIndex((e) => defaultCircuitBreaker.getEndpointKey(e) === endpointKey);
+      const current = pendingFailovers.get(agent.id) || { count: 0, index: currentIndex >= 0 ? currentIndex : 0 };
       if (current.count >= endpoints.length - 1) {
         // Give up on this agent. Without clearing the state, a later host-driven
         // retry would still be rewritten onto the stale failover target even
         // though the plugin declined to fail over again.
         pendingFailovers.delete(agent.id);
+        retryIncidents.delete(agent.id);
         return next();
       }
 
@@ -236,7 +305,7 @@ export function apply(ctx: CordisContext): void {
       for (let step = 1; step <= endpoints.length - 1; step++) {
         const candidateIndex = (current.index + step) % endpoints.length;
         const candidate = endpoints[candidateIndex];
-        const isCurrent = currentEndpoint !== undefined && defaultCircuitBreaker.getEndpointKey(candidate) === defaultCircuitBreaker.getEndpointKey(currentEndpoint);
+        const isCurrent = defaultCircuitBreaker.getEndpointKey(candidate) === endpointKey;
         if (isCurrent) continue;
         if (defaultCircuitBreaker.isHealthy(candidate)) {
           nextIndex = candidateIndex;
@@ -266,7 +335,7 @@ export function apply(ctx: CordisContext): void {
         index: nextIndex
       });
 
-      recordFailover(agent.id, currentEndpoint ?? undefined, endpoints[nextIndex]);
+      recordFailover(agent.id, currentEndpoint, endpoints[nextIndex]);
 
       return { kind: 'retry' };
     } catch (error) {
@@ -345,6 +414,7 @@ export function apply(ctx: CordisContext): void {
     if (agent?.id) {
       pendingFailovers.delete(agent.id);
       activeEndpoints.delete(agent.id);
+      retryIncidents.delete(agent.id);
     }
   });
 
@@ -355,6 +425,7 @@ export function apply(ctx: CordisContext): void {
     disposeDisposed();
     pendingFailovers.clear();
     activeEndpoints.clear();
+    retryIncidents.clear();
     defaultCircuitBreaker.clear();
     resetTelemetry();
     disposeWatcher();

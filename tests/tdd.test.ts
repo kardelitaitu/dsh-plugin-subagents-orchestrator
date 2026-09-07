@@ -29,6 +29,9 @@ describe('TDD bug probes', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
+      maxRetries: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -38,6 +41,9 @@ describe('TDD bug probes', () => {
     apply(ctx);
 
     const subagent = createMockAgent('tdd-1', 'subagent');
+
+    // The host assigned p1 before the request failed.
+    await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
 
     // First failure consumes the only available failover slot (2 endpoints)
     await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'SERVER' } });
@@ -72,6 +78,8 @@ describe('TDD bug probes', () => {
     setConfigForTest({
       enabled: true,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }
@@ -89,6 +97,8 @@ describe('TDD bug probes', () => {
     setConfigForTest({
       enabled: false,
       failover: true,
+      intervalMinMs: 0,
+      intervalMaxMs: 0,
       endpoints: [
         { provider: 'p1', model: 'm1' },
         { provider: 'p2', model: 'm2' }

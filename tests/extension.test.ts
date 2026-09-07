@@ -88,6 +88,9 @@ describe('Config Extension: debug flag & per-endpoint enabled', () => {
       setConfigForTest({
         enabled: true,
         failover: true,
+        intervalMinMs: 0,
+        intervalMaxMs: 0,
+        maxRetries: 0,
         endpoints: [
           { provider: 'p1', model: 'm1' },
           { provider: 'off', model: 'm2', enabled: false },
@@ -98,6 +101,8 @@ describe('Config Extension: debug flag & per-endpoint enabled', () => {
       apply(ctx);
 
       const subagent = createMockAgent('sub-ext-1', 'subagent');
+      // The host assigned p1 (the only enabled candidate before the failure).
+      await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));
       await ctx.emit('agent/request-error', { agent: subagent, failure: { code: 'SERVER' } });
 
       const retry: any = await ctx.emit('agent/request', { agent: subagent }, () => ({ provider: 'p1', model: 'm1' }));

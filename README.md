@@ -73,6 +73,7 @@ subagents-orchestrator:
 | `failover` | `boolean` | `true` | Automatically failover to next endpoint on rate limits/errors |
 | `cooldownMs` | `number` | `60000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
 | `maxFailures` | `number` | `3` | Consecutive failures before an endpoint trips |
+| `maxRetries` | `number` | `20` | Same-endpoint retry budget: an eligible failure is retried on the CURRENT endpoint this many times (each pause 3-5s via `intervalMinMs`/`intervalMaxMs`) before failing over to the next endpoint — every failover target starts with a fresh budget, and a provider `Retry-After` hint trips the endpoint instead of burning retries |
 | `intervalMinMs` | `number` | `3000` | Lower bound of the randomized wait before a retried subagent request (failover pacing; `0` disables the wait) |
 | `intervalMaxMs` | `number` | `5000` | Upper bound of the randomized wait before a retried subagent request (failover pacing) |
 | `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |

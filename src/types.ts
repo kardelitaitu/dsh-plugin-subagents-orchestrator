@@ -19,6 +19,8 @@ export interface OrchestratorConfig {
   intervalMinMs?: number;
   /** Upper bound (ms) of the randomized wait before a retried subagent request. */
   intervalMaxMs?: number;
+  /** Same-endpoint retry budget: retries spent on the current endpoint before failing over to the next pool entry. */
+  maxRetries?: number;
   /** Emit structured telemetry debug lines for every routing event. */
   debug?: boolean;
   endpoints?: Endpoint[];
