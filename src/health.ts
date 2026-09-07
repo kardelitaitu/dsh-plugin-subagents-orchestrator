@@ -103,8 +103,10 @@ export class CircuitBreaker {
     const cooldown = Math.max(0, cooldownMs);
 
     if (status.trippedUntil !== null && now < status.trippedUntil) {
-      // Failed again during cooldown: restart the window from this failure.
-      status.trippedUntil = now + cooldown;
+      // Failed again during cooldown: the window may extend from this
+      // failure but can never shrink below the current promise (a provider
+      // hint's remaining tail wins over a shorter default cooldown).
+      status.trippedUntil = Math.max(status.trippedUntil, now + cooldown);
       return true;
     }
 
