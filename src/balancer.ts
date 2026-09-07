@@ -63,7 +63,10 @@ export function pickNextEndpoint(
 
     case 'round-robin':
     default: {
-      const index = Math.abs(Math.trunc(cursor)) % pool.length;
+      // NaN or Infinity cursors (bad caller math) must degrade to the start
+      // of the pool, not resolve to `undefined` through NaN modulo.
+      const safeCursor = Number.isFinite(cursor) ? Math.abs(Math.trunc(cursor)) : 0;
+      const index = safeCursor % pool.length;
       return pool[index];
     }
   }

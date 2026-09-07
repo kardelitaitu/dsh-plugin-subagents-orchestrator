@@ -262,19 +262,6 @@ export function apply(ctx: CordisContext): void {
         }
       }
 
-      // The walk is spent for this incident: keep accounting the failure
-      // (breaker + telemetry still learn about it) but defer the decision -
-      // never re-plan a failover the plugin already declined.
-      const exhaustedMarker = exhaustedAgents.get(agent.id);
-      if (
-        exhaustedMarker &&
-        exhaustedMarker.turn === payload.turn &&
-        exhaustedMarker.step === payload.step
-      ) {
-        pendingFailovers.delete(agent.id);
-        return next();
-      }
-
       // Trip circuit breaker on failure. A provider cooldown hint
       // (Retry-After / x-ratelimit-reset, host-parsed when available) trips
       // the endpoint immediately for exactly that window; otherwise the
@@ -285,6 +272,19 @@ export function apply(ctx: CordisContext): void {
         hintMs ?? config.cooldownMs ?? 60000
       );
       recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
+
+      // The walk is spent for this incident: keep accounting the failure
+      // (breaker + telemetry above) but defer the decision - never re-plan a
+      // failover the plugin already declined.
+      const exhaustedMarker = exhaustedAgents.get(agent.id);
+      if (
+        exhaustedMarker &&
+        exhaustedMarker.turn === payload.turn &&
+        exhaustedMarker.step === payload.step
+      ) {
+        pendingFailovers.delete(agent.id);
+        return next();
+      }
 
       // Terminal failures point at the account, not at transient load: an
       // exhausted quota/balance and a broken credential cannot heal on the
