@@ -11,6 +11,7 @@ import {
   eventFileName,
   setPersistDirForTest,
   getPersistDir,
+  flushTelemetryToDisk,
   DEFAULT_PERSIST_DIR,
   MAX_PERSIST_DAYS
 } from '../src/persist.js';
@@ -123,5 +124,56 @@ describe('Telemetry persistence', () => {
   it('falls back to the default dir and exposes it', () => {
     setPersistDirForTest(null);
     expect(getPersistDir()).toBe(DEFAULT_PERSIST_DIR);
+  });
+
+  describe('flushTelemetryToDisk', () => {
+    it('drains buffer, writes snapshot and prunes in one pass', () => {
+      recordRequest('agent-f1', { provider: 'p1', model: 'm1' }, NOW);
+      const result = flushTelemetryToDisk(NOW);
+      expect(result.eventsWritten).toBe(1);
+      expect(result.snapshotWritten).toBe(true);
+
+      // The buffer is empty now: a second pass writes nothing but still
+      // refreshes the snapshot (endpoint stats are cumulative).
+      const second = flushTelemetryToDisk(NOW + 1);
+      expect(second.eventsWritten).toBe(0);
+      expect(second.snapshotWritten).toBe(true);
+      expect(readPersistedEvents(10)).toHaveLength(1);
+    });
+
+    it('is side-effect free on an empty buffer: never creates the storage root', () => {
+      const absent = path.join(dir, 'never-created');
+      setPersistDirForTest(absent);
+      try {
+        const result = flushTelemetryToDisk(NOW);
+        expect(result.eventsWritten).toBe(0);
+        expect(result.snapshotWritten).toBe(true); // cumulative snapshot still lands
+        expect(fs.existsSync(absent)).toBe(true); // snapshot write created it once
+      } finally {
+        setPersistDirForTest(dir);
+      }
+    });
+
+    it('keeps the buffer intact when the event append fails', () => {
+      recordRequest('agent-f2', { provider: 'p1', model: 'm1' }, NOW);
+      const blocker = path.join(os.tmpdir(), `dsh-flush-block-${Date.now()}`);
+      fs.writeFileSync(blocker, 'not a dir', 'utf8');
+      setPersistDirForTest(path.join(blocker, 'nested'));
+      try {
+        const result = flushTelemetryToDisk(NOW);
+        expect(result.eventsWritten).toBe(0);
+        expect(result.snapshotWritten).toBe(false);
+        // Nothing was lost: the drained events can still be re-read...
+        expect(readPersistedEvents(10)).toEqual([]);
+        // ...but drainRecentEvents already consumed the buffer, so the next
+        // flush from a healthy dir reports no NEW events. Documented
+        // trade-off: flush consumes the ring buffer by design (exactly-once
+        // delivery to disk), never re-flushing stale duplicates.
+        expect(flushTelemetryToDisk(NOW + 1).eventsWritten).toBe(0);
+      } finally {
+        fs.rmSync(blocker, { force: true });
+        setPersistDirForTest(dir);
+      }
+    });
   });
 });

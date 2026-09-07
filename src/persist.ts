@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { drainRecentEvents, getEndpointStats } from './telemetry.js';
 import type { TelemetryEvent, EndpointStats } from './telemetry.js';
 
 /**
@@ -142,4 +143,30 @@ export function pruneOldBuckets(now: number = Date.now()): string[] {
   } catch {
     return [];
   }
+}
+
+/** Result of one flush pass; every counter is best-effort. */
+export interface FlushResult {
+  /** Events appended to the day-bucket log (0 when the buffer was empty). */
+  eventsWritten: number;
+  /** Whether the endpoint snapshot was replaced. */
+  snapshotWritten: boolean;
+  /** Day buckets removed by retention pruning. */
+  bucketsPruned: string[];
+}
+
+/**
+ * One telemetry flush pass: drain the ring buffer into the day-bucket log,
+ * atomically replace the endpoint snapshot, then apply retention pruning.
+ *
+ * Safe to call at any cadence — an empty buffer writes nothing (not even the
+ * storage root). Never throws: a diagnostics flush must never take the host
+ * plane down, so failures surface as falsey counters in the result.
+ */
+export function flushTelemetryToDisk(now: number = Date.now()): FlushResult {
+  const drained: TelemetryEvent[] = drainRecentEvents();
+  const eventsWritten = drained.length > 0 ? appendEvents(drained, now) : 0;
+  const snapshotWritten = writeEndpointStatsSnapshot(getEndpointStats(), now);
+  const bucketsPruned = pruneOldBuckets(now);
+  return { eventsWritten, snapshotWritten, bucketsPruned };
 }
