@@ -267,4 +267,36 @@ describe('Cordis Subagents Orchestrator Plugin', () => {
     expect(events[1]).toMatchObject({ code: 'RATE_LIMIT', hintMs: 30000 });
     expect(events[2]).toMatchObject({ from: { provider: 'p1' }, to: { provider: 'p2' } });
   });
+
+  it('routes bare start() calls that carry no request object', async () => {
+    setConfigForTest({
+      enabled: true,
+      strategy: 'round-robin',
+      endpoints: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' }
+      ]
+    });
+
+    apply(ctx);
+
+    const r1: any = await ctx.subagents.start!('worker-bare-1');
+    const r2: any = await ctx.subagents.start!('worker-bare-2');
+
+    expect(r1.request.agentOptions).toEqual({ provider: 'p1', model: 'm1' });
+    expect(r2.request.agentOptions).toEqual({ provider: 'p2', model: 'm2' });
+  });
+
+  it('routes spec-less startContinuable() calls', async () => {
+    setConfigForTest({
+      enabled: true,
+      strategy: 'round-robin',
+      endpoints: [{ provider: 'p1', model: 'm1' }]
+    });
+
+    apply(ctx);
+
+    const res: any = await ctx.subagents.startContinuable!();
+    expect(res.spec.request.agentOptions).toEqual({ provider: 'p1', model: 'm1' });
+  });
 });

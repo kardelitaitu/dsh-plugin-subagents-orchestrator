@@ -51,16 +51,15 @@ export function apply(ctx: CordisContext): void {
   refreshTelemetryDebug();
 
   function wrapRequest(request?: SubagentRequest): SubagentRequest | undefined {
-    if (!request) return request;
-    // Respect explicit model if already requested by caller
-    if (request.agentOptions !== void 0) return request;
-
     const config = getConfig();
     if (!config || config.enabled === false) return request;
     refreshTelemetryDebug();
 
     const endpoints = getCachedEndpoints();
     if (endpoints.length === 0) return request;
+
+    // Respect explicit model if already requested by caller
+    if (request && request.agentOptions !== void 0) return request;
 
     const picked = pickNextEndpoint(
       endpoints,
@@ -70,8 +69,10 @@ export function apply(ctx: CordisContext): void {
     );
     if (!picked) return request;
 
+    // A missing request object must not bypass orchestration: bare
+    // start(name) calls are routed exactly like start(name, {}).
     return {
-      ...request,
+      ...(request ?? {}),
       agentOptions: {
         provider: picked.provider,
         model: picked.model,
@@ -96,7 +97,13 @@ export function apply(ctx: CordisContext): void {
 
     if (typeof originalStartContinuable === 'function') {
       raw.startContinuable = async function (spec?: ContinuableSpec) {
-        if (!spec) return originalStartContinuable.call(raw, spec);
+        if (!spec) {
+          // Spec-less continuable creation is routed like a bare start():
+          // continuation afterwards happens via send_message, so injecting the
+          // endpoint here cannot relocate a mid-flight conversation.
+          const routed = wrapRequest(undefined);
+          return originalStartContinuable.call(raw, routed ? { request: routed } : undefined);
+        }
         return originalStartContinuable.call(raw, {
           ...spec,
           request: wrapRequest(spec.request)
