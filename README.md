@@ -105,6 +105,14 @@ console.log(formatDiagnostics(snapshot));
 
 The snapshot is strictly non-mutating: breaker health is derived from the stored status rather than `isHealthy()`, whose probation transition is a state write — probing never changes routing behavior, touches the disk, or reads live references (every call returns fresh plain data). It is safe to call before `apply()`, after dispose, and with a missing or malformed settings file.
 
+**Offline diagnostics**: with `persistTelemetry: true`, the same data lands under `~/.dsh/telemetry/subagents-orchestrator` (day-bucketed JSONL events + endpoint snapshot, 7-day retention). A dependency-free reader prints it any time — even while DSH is running or after a crash:
+
+```bash
+node scripts/telemetry-report.mjs          # human-readable summary
+node scripts/telemetry-report.mjs --json   # machine-readable for tooling
+node scripts/telemetry-report.mjs --events 50 --dir ~/.dsh/telemetry/subagents-orchestrator
+```
+
 ## Project Structure
 
 ```
