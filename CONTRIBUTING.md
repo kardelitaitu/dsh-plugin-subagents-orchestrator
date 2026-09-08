@@ -7,6 +7,9 @@ pnpm install        # dependencies
 pnpm test           # vitest over tests/**/*.test.ts
 pnpm typecheck      # tsc --noEmit
 pnpm build          # tsup -> lib/
+pnpm run verify     # typecheck + tests (what the pre-push hook runs)
+pnpm run ci:local   # verify + build + publish preflight, offline
+pnpm run release:check   # the full publish gate (see Releasing)
 ```
 
 Host-contract facts (event surface, failure taxonomy, retry layering) are
@@ -66,6 +69,47 @@ exists so independent work streams never corrupt each other.
   compiled from another session's uncommitted source.
 - Interleaved histories are normal: expect commits from the other session to
   land between yours; rebase-free linear flow is preserved by scoped commits.
+
+## Releasing
+
+Publishing is one tag push; everything before it is local and checkable.
+
+`@B@`sh
+pnpm run hooks:install     # once per clone (no auto-install; see .githooks/README.md)
+pnpm run release:check     # publish preflight
+`@B@`
+
+1. **Land the work on `main`.** The pre-push hook runs typecheck + the suite so a
+   red tree cannot leave the machine; CI is still the source of truth.
+2. **Cut the version** in one commit: `version` in `package.json` plus a matching
+   `## [X.Y.Z]` section in `CHANGELOG.md` (`release:check` refuses a version the
+   changelog does not describe), and the `lib/` rebuild. `lib/` is committed on
+   purpose - a git-hosted install (`dsh plugin add github:owner/repo`) ships it as-is -
+   so both CI and the release workflow fail when it no longer matches `src/`.
+   Semantic versioning is a promise to consumers: new config keys and
+   subpaths are a minor bump, anything that changes routing defaults is major.
+3. **Preflight** with `pnpm run release:check`. Stages: manifest metadata ->
+   docs -> real `npm pack` -> install the tarball into a throwaway consumer
+   project and import every published subpath -> registry duplicate-version
+   probe. Add `--build-parity` to prove the committed `lib/` matches a fresh build,
+   or `--skip-install` / `--offline` when there is no network.
+4. **Tag and push**: `git tag -a vX.Y.Z -m "release X.Y.Z" && git push origin vX.Y.Z`.
+   `.github/workflows/release.yml` re-runs the whole gate, packs the artifact and
+   publishes it with npm OIDC provenance, so no long-lived token sits in
+   repository secrets (add an `NPM_TOKEN` secret to use a token instead). Run it
+   via *Actions -> Release -> Run workflow* with `dry_run` on to rehearse.
+5. **Verify from the registry**: `npm view dsh-plugin-subagents-orchestrator version`,
+   then install it into a profile with
+   `dsh plugin --profile desktop add dsh-plugin-subagents-orchestrator`.
+
+Rules that keep a release honest:
+
+- Never publish from a working tree - the workflow publishes what it packs from
+  the tag, so uncommitted work is simply not in the release.
+- A tag is immutable. If a published tag's workflow run failed, fix forward with
+  the next patch version; do not move or re-point the tag.
+- `npm deprecate` is the only rollback: a published version cannot be deleted
+  inside the 72-hour window, so `npm unpublish` is not part of this process.
 
 ## Host-plane safety invariants
 

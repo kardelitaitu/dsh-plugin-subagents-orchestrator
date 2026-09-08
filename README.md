@@ -146,7 +146,7 @@ pnpm report --events 50 --dir ~/.dsh/telemetry/subagents-orchestrator
 
 ## Install
 
-Install from the npm registry:
+Install from the npm registry (this package goes live with the `v1.2.0` release; until then use the GitHub route below):
 
 ```bash
 npm install dsh-plugin-subagents-orchestrator
@@ -195,6 +195,18 @@ pnpm install
 ```
 
 This manual route is the only one that needs the hand-edited `dsh.profile.bundles` registration - the `dsh plugin add` commands above keep the bundle stack in sync automatically.
+
+---
+
+## Development & release
+
+```bash
+pnpm run verify         # strict typecheck + vitest (the pre-push gate)
+pnpm run ci:local       # verify + tsup build + publish preflight, offline
+pnpm run release:check  # the publish gate: pack, install-the-tarball, registry probe
+```
+
+`release:check` does not trust `npm pack --dry-run`: it packs a real tarball, installs it into a throwaway consumer project and imports every published subpath (`.`, `./diagnostics`, the offline report script, the Cordis client wrapper) before npm ever sees it. Pushing a `vX.Y.Z` tag then runs the same gate in GitHub Actions and publishes with npm OIDC provenance - see [CONTRIBUTING.md](./CONTRIBUTING.md#releasing).
 
 ---
 

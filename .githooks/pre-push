@@ -12,9 +12,13 @@
 # before anything leaves the machine. tsconfig.json excludes tests/, so the
 # typecheck alone would NOT have caught the tdd21 breakage; the suite does.
 #
-# Install once per clone:  npm run hooks:install   (any pnpm/npm install runs
-#                          it for you through the "prepare" script)
-# Bypass one push:         git push --no-verify    (or DSH_SKIP_PUSH_VERIFY=1)
+# Install once per clone:  pnpm run hooks:install  (sets core.hooksPath)
+#
+# There is deliberately NO "prepare" script: npm runs it for every consumer
+# that installs this repo from git (dsh plugin add github:...), which is how
+# git-hosted installs broke in 64c00b0. Hook setup stays an explicit opt-in.
+#
+# Bypass one push:          git push --no-verify   (or DSH_SKIP_PUSH_VERIFY=1)
 
 if [ "$DSH_SKIP_PUSH_VERIFY" = "1" ]; then
   echo "pre-push: verification skipped (DSH_SKIP_PUSH_VERIFY=1)" >&2

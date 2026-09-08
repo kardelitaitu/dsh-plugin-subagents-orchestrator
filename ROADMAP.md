@@ -74,9 +74,21 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 ## 📦 Phase 5: Distribution & Packaging
 
 - [x] Add unit and integration tests simulating subagent session execution.
-- [ ] Publish to npm / open-source repository for community use.
-
----
+- [x] CI gate: strict typecheck + vitest + tsup build on Node 20/22, `npm pack --dry-run`
+      for the manifest, and a "committed `lib/` matches `src/`" check (git-hosted installs
+      ship `lib/` verbatim, so a stale build must never reach a tag).
+- [x] Pre-push hook mirroring the blocking CI steps locally.
+- [x] Publish preflight (`scripts/release-check.mjs`, `pnpm run release:check`): publish
+      metadata, changelog-for-version, a real `npm pack`, install the tarball into a
+      throwaway consumer project and import every published subpath, then probe
+      the registry for the version being cut.
+- [x] v1.2.0 cut: version bump + changelog for everything merged after the
+      `v1.1.0` tag (nothing had reached npm before this cycle).
+- [x] Tag-triggered publish workflow with npm OIDC provenance
+      (`.github/workflows/release.yml`), plus a dry-run mode to rehearse a release.
+- [ ] First publish: push the `v1.2.0` tag so the workflow releases it - needs the
+      maintainer's npm account (trusted publisher for this repo, or an
+      `NPM_TOKEN` secret). The artifact itself is already gated and green.
 
 ## 🧭 Candidate: Pool / Fallback endpoint modes (v2)
 
