@@ -13,6 +13,8 @@ import type {
 import {
   getConfig,
   getCachedEndpoints,
+  getCachedFallbackChain,
+  getCachedMode,
   initWatcher,
   disposeWatcher
 } from './config.js';
@@ -236,7 +238,14 @@ export function apply(ctx: CordisContext): void {
       if (!config || config.enabled === false || config.failover === false) return next();
       refreshTelemetryDebug();
 
-      const endpoints = getCachedEndpoints();
+      // Tiered candidate list (v2): primaries first, then the fallback rescue
+      // chain. Without a rescue chain this is exactly the historical pool —
+      // every bound and walk below degenerates to the previous behavior.
+      // A single primary in fallback mode stays eligible for rescue (it is
+      // what the chain rescues), so the <2 check counts the combined list.
+      const primaryEndpoints = getCachedEndpoints();
+      const fallbackChain = getCachedMode() === 'fallback' ? getCachedFallbackChain() : [];
+      const endpoints = fallbackChain.length > 0 ? [...primaryEndpoints, ...fallbackChain] : primaryEndpoints;
       if (endpoints.length < 2) return next();
 
       const { agent, failure, signal } = payload;
@@ -331,9 +340,12 @@ export function apply(ctx: CordisContext): void {
       }
 
       // Retry budget exhausted (or provider-hinted trip): advance to the
-      // next fallback endpoint, skipping endpoints the breaker has tripped
+      // next candidate, skipping endpoints the breaker has tripped
       // (unless every remaining candidate is tripped — degraded attempts
-      // still beat a hard stall).
+      // still beat a hard stall). Tier order (fallback mode): healthy
+      // primaries first, then healthy rescue entries, then the degraded
+      // primary walk (unchanged), then degraded rescue entries.
+      const primaryCount = endpoints.length - fallbackChain.length;
       const currentIndex = endpoints.findIndex((e) => defaultCircuitBreaker.getEndpointKey(e) === endpointKey);
       const current = pendingFailovers.get(agent.id) || { count: 0, index: currentIndex >= 0 ? currentIndex : 0 };
       if (current.count >= endpoints.length - 1) {
@@ -349,20 +361,73 @@ export function apply(ctx: CordisContext): void {
         return next();
       }
 
-      // Advance to the next candidate, skipping endpoints the breaker has tripped
-      // (unless every remaining candidate is tripped — degraded attempts still
-      // beat a hard stall).
+      // Advance to the next candidate, skipping endpoints the breaker has
+      // tripped (unless every remaining candidate is tripped — degraded
+      // attempts still beat a hard stall).
+      //
+      // Tier order (v2): healthy primaries first, then healthy rescue
+      // entries, then the degraded primary walk, then degraded rescue
+      // entries. The search is tier-relative to the CURRENT endpoint, so an
+      // agent already on a rescue entry can still come home to a healthy
+      // primary. Pool mode has no chain and degenerates to the exact
+      // historical rotation.
       let nextIndex = -1;
-      for (let step = 1; step <= endpoints.length - 1; step++) {
-        const candidateIndex = (current.index + step) % endpoints.length;
+      let nextTier: 'primary' | 'fallback' = 'primary';
+      let degradedIndex = -1;
+      let degradedTier: 'primary' | 'fallback' = 'primary';
+
+      const isCurrentKey = (candidate: Endpoint) =>
+        defaultCircuitBreaker.getEndpointKey(candidate) === endpointKey;
+      const noteDegraded = (index: number, tier: 'primary' | 'fallback') => {
+        if (degradedIndex === -1) {
+          degradedIndex = index;
+          degradedTier = tier;
+        }
+      };
+
+      // Which tier is the CURRENT endpoint on? A stored plan says so
+      // directly; a fresh walk infers it from where the key lives.
+      const currentChainIndex = fallbackChain.findIndex(isCurrentKey);
+      const currentIsRescuer = currentChainIndex >= 0;
+
+      // 1) Healthy primaries: rotation order when the walk is on a primary,
+      //    a full sweep (returning home) when it sits on a rescue entry.
+      const primaryStart = currentIsRescuer ? 0 : ((currentIndex % primaryCount) + primaryCount) % primaryCount;
+      for (let step = 1; step <= primaryCount; step++) {
+        const candidateIndex = (primaryStart + step) % primaryCount;
         const candidate = endpoints[candidateIndex];
-        const isCurrent = defaultCircuitBreaker.getEndpointKey(candidate) === endpointKey;
-        if (isCurrent) continue;
+        if (isCurrentKey(candidate)) continue;
         if (defaultCircuitBreaker.isHealthy(candidate)) {
           nextIndex = candidateIndex;
+          nextTier = 'primary';
           break;
         }
-        if (nextIndex === -1) nextIndex = candidateIndex;
+        noteDegraded(candidateIndex, 'primary');
+      }
+
+      // 2) Healthy rescue entries: forward from the current position when
+      //    already on the chain, from the top otherwise.
+      if (nextIndex === -1 && fallbackChain.length > 0) {
+        const chainStart = currentIsRescuer ? currentChainIndex : -1;
+        for (let fi = 0; fi < fallbackChain.length; fi++) {
+          const idx = (chainStart + 1 + fi) % fallbackChain.length;
+          const candidate = fallbackChain[idx];
+          if (isCurrentKey(candidate)) continue;
+          if (defaultCircuitBreaker.isHealthy(candidate)) {
+            nextIndex = idx;
+            nextTier = 'fallback';
+            break;
+          }
+          noteDegraded(idx, 'fallback');
+        }
+      }
+
+      // 3) Degraded: every candidate is tripped — take the first
+      //    non-current candidate (primary, then chain) so attempts still
+      //    happen instead of stalling.
+      if (nextIndex === -1 && degradedIndex !== -1) {
+        nextIndex = degradedIndex;
+        nextTier = degradedTier;
       }
       if (nextIndex === -1) return next();
 
@@ -383,10 +448,15 @@ export function apply(ctx: CordisContext): void {
 
       pendingFailovers.set(agent.id, {
         count: current.count + 1,
-        index: nextIndex
+        index: nextIndex,
+        tier: nextTier
       });
 
-      recordFailover(agent.id, currentEndpoint, endpoints[nextIndex]);
+      recordFailover(
+        agent.id,
+        currentEndpoint,
+        nextTier === 'fallback' ? fallbackChain[nextIndex] : endpoints[nextIndex]
+      );
 
       return { kind: 'retry' };
     } catch (error) {
@@ -443,7 +513,14 @@ export function apply(ctx: CordisContext): void {
     }
 
     const endpoints = getCachedEndpoints();
-    const target = endpoints[current.index];
+    // Tier-aware target (v2): a fallback-tier index addresses the rescue
+    // chain, not the primary list. The tier marker was recorded when the
+    // failover was committed; a hot-reload that shrinks the chain leaves
+    // the target undefined and the request passes through untouched.
+    const target =
+      current.tier === 'fallback'
+        ? getCachedFallbackChain()[current.index]
+        : endpoints[current.index];
     if (!target) return next();
 
     activeEndpoints.set(agent.id, target);
