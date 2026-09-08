@@ -3,6 +3,11 @@
 > Intelligent multi-endpoint load distributor and automated error-failover plugin for **DeepSeek Harness (DSH)** subagents.
 > Coded by glm-5.3-flash
 
+[![CI](https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator/actions/workflows/ci.yml?query=branch%3Amain)
+ [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+ [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
+ [![npm](https://img.shields.io/badge/npm-not%20published%20yet-orange.svg)](https://www.npmjs.com/package/dsh-plugin-subagents-orchestrator)
+
 ---
 
 ## Overview

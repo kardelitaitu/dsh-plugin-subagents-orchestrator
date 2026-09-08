@@ -106,6 +106,8 @@ pnpm run release:check     # publish preflight
 5. **Verify from the registry**: `npm view dsh-plugin-subagents-orchestrator version`,
    then install it into a profile with
    `dsh plugin --profile desktop add dsh-plugin-subagents-orchestrator`.
+   Finally swap the `npm: not published yet` badge in the README for
+   `[![npm version](https://img.shields.io/npm/v/dsh-plugin-subagents-orchestrator.svg)](https://www.npmjs.com/package/dsh-plugin-subagents-orchestrator)`.
 
 Rules that keep a release honest:
 
