@@ -40,15 +40,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   Strictly non-mutating — breaker health is derived without tripping the
   probation transition, and probing never touches the disk.
 - Durable telemetry persistence (`persist.ts`, opt-in via
-  `persistTelemetry`): on plugin dispose the event ring is drained into
+  `persistTelemetry`): on plugin dispose the event ring is flushed into
   day-bucketed JSONL (7-day retention) and an endpoint-stats snapshot is
   written atomically under `~/.dsh/telemetry/subagents-orchestrator`;
-  every failure path is best-effort so diagnostics can never take the
-  host plane down, and the default stays off (no disk side effects).
-- Offline report script (`scripts/telemetry-report.mjs`): dependency-free,
-  read-only reader for the persisted diagnostics — human-readable or
-  `--json`, `--events N` tail, works while DSH runs or after a crash;
-  missing or corrupt stores degrade to a location report.
+  the buffer is consumed only after a successful append, so a failed
+  write never loses diagnostics, and the default stays off (no disk
+  side effects).
+- Offline report script (`scripts/telemetry-report.mjs`, `pnpm report`):
+  dependency-free, read-only reader for the persisted diagnostics —
+  human-readable or `--json`, `--events N` tail, works while DSH runs or
+  after a crash; missing or corrupt stores degrade to a location report.
+- CI runs `npm pack --dry-run` after build, so packaging regressions
+  (files-manifest omissions) fail the build instead of the publish.
 
 ### Changed
 
@@ -64,6 +67,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   calls are now routed instead of silently bypassing orchestration.
 - Failover no longer targets tripped endpoints while a healthy alternative
   exists.
+- `scripts/` ships in the npm `files` manifest, so the `pnpm report`
+  alias has its target in the published package.
 
 ## [1.0.0] - 2026-09-08
 
