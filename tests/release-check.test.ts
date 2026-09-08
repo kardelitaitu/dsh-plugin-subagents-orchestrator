@@ -15,6 +15,7 @@ import {
   classifyLicense,
   parseRepoSlug,
   checkRepositoryRemote,
+  validateBundlePatch,
   auditLicenses,
   GIT_HOSTILE_SCRIPTS,
 } from '../scripts/release-check.mjs';
@@ -439,5 +440,48 @@ describe('repository cross-check (publish preflight, part 3)', () => {
       const res = checkRepositoryRemote(pkgWith('see README'), 'https://github.com/a/b.git');
       expect(res.warnings.join('|')).toMatch(/not a recognizable git URL/);
     });
+  });
+});
+
+describe('Cordis bundle patch (publish preflight, part 4)', () => {
+  const pkg = { name: 'dsh-demo' };
+  const good = '# Subagents Orchestrator bundle patch\n- insert:\n    - id: dsh-demo\n      name: dsh-demo\n';
+
+  it('accepts a patch that registers the published package', () => {
+    const { issues, warnings, notes } = validateBundlePatch(good, pkg);
+    expect(issues).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(notes.join('|')).toMatch(/registers "dsh-demo"/);
+  });
+
+  it('blocks a patch whose id names another package - installs, then loads nothing', () => {
+    const { issues } = validateBundlePatch('- insert:\n    - id: other-plugin\n      name: other-plugin\n', pkg);
+    expect(issues.join('|')).toMatch(/id is "other-plugin" but the package is "dsh-demo"/);
+  });
+
+  it('blocks an empty or id-less patch', () => {
+    expect(validateBundlePatch('', pkg).issues.join('|')).toMatch(/empty or unreadable/);
+    expect(validateBundlePatch('- insert:\n    - name: dsh-demo\n', pkg).issues.join('|')).toMatch(/declares no id/);
+  });
+
+  it('warns about a shape that is probably not a Cordis patch, and accepts quoted ids', () => {
+    expect(validateBundlePatch('- id: dsh-demo\n  name: dsh-demo\n', pkg).warnings.join('|')).toMatch(/no "insert:" block/);
+    expect(validateBundlePatch('- insert:\n    - id: "dsh-demo"\n      name: "dsh-demo"\n', pkg).issues).toEqual([]);
+  });
+
+  it('warns when only one entry of a multi-entry patch matches', () => {
+    const { issues, warnings } = validateBundlePatch(
+      '- insert:\n    - id: dsh-demo\n      name: dsh-demo\n    - id: leftover\n      name: leftover\n',
+      pkg
+    );
+    expect(issues).toEqual([]);
+    expect(warnings.join('|')).toMatch(/leftover.*differs/);
+  });
+
+  it('passes on the real patch in this repo (what DSH actually loads)', () => {
+    const text = fs.readFileSync(path.join(repoRoot, realPkg.dsh.bundle.patch.replace(/^\.\//, '')), 'utf8');
+    const { issues, warnings } = validateBundlePatch(text, realPkg);
+    expect(issues).toEqual([]);
+    expect(warnings).toEqual([]);
   });
 });

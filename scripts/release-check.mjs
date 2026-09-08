@@ -14,8 +14,9 @@
  *   1. manifest  - publish metadata, engines, no git-hostile lifecycle scripts,
  *                  no local-only dependency specs, every 'exports' target is a
  *                  real file that the 'files' allowlist will actually ship.
- *   2. docs      - LICENSE / README / CHANGELOG ship, and CHANGELOG carries a
- *                  section for the exact version being published.
+ *   2. docs      - LICENSE / README / CHANGELOG ship, CHANGELOG carries a section
+ *                  for the exact version being published, and the DSH bundle
+ *                  patch registers the name that is about to be published.
  *   3. pack      - real 'npm pack' into a temp dir, then the tarball file list
  *                  is checked (no src/, tests/, .github/ leakage).
  *   4. install   - 'npm install <tarball>' into a throwaway project and import
@@ -374,12 +375,61 @@ export function parseRepoSlug(url) {
 }
 
 /**
-  * The README installs this plugin with 'dsh plugin add github:owner/repo', and
-  * npm renders repository.url on the package page. If the manifest and the
-  * remote this checkout pushes to disagree, the published package advertises a
-  * source the documented install route cannot resolve. A different repository
-  * *name* is a hard failure; a different owner only warns, because that is what
-  * a fork's pull-request job legitimately looks like.
+ * The Cordis patch is what makes DSH's profile bundle stack load the plugin:
+ * 'dsh plugin add' registers the package in 'dsh.profile.bundles' through
+ * 'dsh.bundle.patch'. If that patch names a different id than the published
+ * package, the install succeeds and the plugin silently never applies - the
+ * worst kind of packaging bug to discover after a release. The parse is
+ * textual so this script stays dependency-free (no yaml import needed).
+ *
+ * @param {string} patchText contents of the file named by dsh.bundle.patch
+ * @param {any} pkg parsed package.json
+ * @returns {{ issues: string[], warnings: string[], notes: string[] }}
+ */
+export function validateBundlePatch(patchText, pkg) {
+  const issues = [];
+  const warnings = [];
+  const notes = [];
+  const name = pkg && typeof pkg.name === 'string' ? pkg.name : '';
+  const clean = (v) => String(v || '').trim().replace(/^["']+|["']+$/g, '');
+  const collect = (key) => {
+    const out = [];
+    const re = new RegExp('^[ \\t]*(?:-[ \\t]*)?' + key + ':[ \\t]*(.+)$', 'gm');
+    let m;
+    while ((m = re.exec(patchText || '')) !== null) out.push(clean(m[1]));
+    return out;
+  };
+  if (typeof patchText !== 'string' || !patchText.trim()) {
+    issues.push('bundle patch is empty or unreadable - DSH cannot register the plugin');
+    return { issues, warnings, notes };
+  }
+  if (!patchText.includes('insert:')) {
+    warnings.push('bundle patch has no "insert:" block - is it still a Cordis patch?');
+  }
+  const ids = collect('id');
+  const names = collect('name');
+  if (!ids.length) {
+    issues.push('bundle patch declares no id - the plugin will not be registered');
+  } else if (name && !ids.includes(name)) {
+    issues.push('bundle patch id is "' + ids.join('", "') + '" but the package is "' + name + '" (installs without loading)');
+  }
+  for (const n of names) {
+    if (name && n !== name) warnings.push('bundle patch name "' + n + '" differs from the package name "' + name + '"');
+  }
+  if (!names.length && ids.length) warnings.push('bundle patch entries carry an id but no name');
+  if (name && ids.includes(name) && names.includes(name)) {
+    notes.push('bundle patch registers "' + name + '" (id and name match the package)');
+  }
+  return { issues, warnings, notes };
+}
+
+/**
+ * The README installs this plugin with 'dsh plugin add github:owner/repo', and
+ * npm renders repository.url on the package page. If the manifest and the
+ * remote this checkout pushes to disagree, the published package advertises a
+ * source the documented install route cannot resolve. A different repository
+ * *name* is a hard failure; a different owner only warns, because that is what
+ * a fork's pull-request job legitimately looks like.
  * @param {any} pkg parsed package.json
  * @param {string|null} remoteUrl output of 'git remote get-url origin'
  * @returns {{ issues: string[], warnings: string[], note: string|null }}
@@ -764,6 +814,16 @@ export function main(argv = []) {
   if (!fs.existsSync(path.join(ROOT, 'LICENSE'))) docIssues.push('LICENSE file is missing (an open-source release needs one)');
   if (!fs.existsSync(path.join(ROOT, 'README.md'))) docIssues.push('README.md is missing');
   emit('docs', docIssues, 'fail');
+
+  // The DSH bundle patch is the plugin-specific half of packaging: an id that
+  // does not match the package name installs cleanly and then loads nothing.
+  const patchPath = pkg.dsh && pkg.dsh.bundle && String(pkg.dsh.bundle.patch || '').replace(/^\.\//, '');
+  if (patchPath) {
+    const patchCheck = validateBundlePatch(safeRead(path.join(ROOT, patchPath)) || '', pkg);
+    emit('patch', patchCheck.issues, 'fail');
+    emit('patch', patchCheck.warnings, 'warn');
+    emit('patch', patchCheck.notes, 'note');
+  }
 
   const packDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-release-pack-'));
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-release-'));
