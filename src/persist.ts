@@ -168,11 +168,21 @@ export function flushTelemetryToDisk(now: number = Date.now()): FlushResult {
   // actually succeeded: a drain-first order would lose buffered
   // diagnostics if the append fails (e.g. the disk fills mid-write).
   const pending: TelemetryEvent[] = getRecentEvents();
-  const eventsWritten = pending.length > 0 ? appendEvents(pending, now) : 0;
-  if (pending.length > 0 && eventsWritten === pending.length) {
-    drainRecentEvents();
+  const stats = getEndpointStats();
+
+  // Idle purity: with no buffered events and no stats there is nothing to
+  // persist, so the storage root must not even be created (an opted-in but
+  // idle plugin leaves zero disk residue).
+  let eventsWritten = 0;
+  let snapshotWritten = false;
+  if (pending.length > 0 || stats.length > 0) {
+    eventsWritten = pending.length > 0 ? appendEvents(pending, now) : 0;
+    if (pending.length > 0 && eventsWritten === pending.length) {
+      drainRecentEvents();
+    }
+    snapshotWritten = writeEndpointStatsSnapshot(stats, now);
   }
-  const snapshotWritten = writeEndpointStatsSnapshot(getEndpointStats(), now);
+
   const bucketsPruned = pruneOldBuckets(now);
   return { eventsWritten, snapshotWritten, bucketsPruned };
 }
