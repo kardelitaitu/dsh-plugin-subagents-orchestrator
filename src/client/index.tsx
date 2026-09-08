@@ -1,4 +1,6 @@
 import React, { useState, useCallback, useSyncExternalStore, useEffect } from 'react';
+import { bindEndpointTest } from './testConnection.js';
+import type { TestConnectionOutcome } from './testConnection.js';
 
 export const NS = 'subagents-orchestrator';
 export const PLUGIN_ID = 'dsh-plugin-subagents-orchestrator';
@@ -282,6 +284,66 @@ const CSS = `
 }
 .dso-status-ok { color: var(--dsw-alias-state-success, #2e9e5b); }
 .dso-status-fail { color: var(--dsw-alias-state-error, #cf222e); }
+.dso-test-btn {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2, #ddd);
+  color: var(--dsw-alias-label-primary, #222);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.dso-test-btn:hover:not(:disabled) {
+  border-color: var(--dsw-alias-brand-primary, #0969da);
+  color: var(--dsw-alias-brand-primary, #0969da);
+}
+.dso-test-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.dso-test-panel {
+  border-top: 1px dashed var(--dsw-alias-border-l2, #ddd);
+  background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.015));
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.dso-test-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dso-test-label {
+  color: var(--dsw-alias-label-tertiary, #777);
+  flex: none;
+}
+.dso-test-input {
+  border: 1px solid var(--dsw-alias-border-l2, #e1e4e8);
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  color: var(--dsw-alias-label-primary, #111);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  outline: none;
+  flex: 1;
+  min-width: 160px;
+}
+.dso-test-input:focus {
+  border-color: var(--dsw-alias-brand-primary, #0969da);
+}
+.dso-test-result {
+  line-height: 1.5;
+  word-break: break-word;
+}
+.dso-test-result.ok { color: var(--dsw-alias-state-success, #2e9e5b); }
+.dso-test-result.fail { color: var(--dsw-alias-state-error, #cf222e); }
+.dso-test-result.warn { color: var(--dsw-alias-state-warning, #9a6700); }
+.dso-test-result.idle { color: var(--dsw-alias-label-tertiary, #777); }
 `;
 
 function ensureCss() {
@@ -347,6 +409,98 @@ export function SubagentsOrchestratorSection(props: any) {
   const [newModel, setNewModel] = useState('');
   const [newWeight, setNewWeight] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Test Connection drawer state (one row at a time).
+  const endpointTest = props?.endpointTest ?? props?.inject?.endpointTest;
+  const [testRow, setTestRow] = useState<number | null>(null);
+  const [testURL, setTestURL] = useState('');
+  const [testKey, setTestKey] = useState('');
+  const [testState, setTestState] = useState<TestConnectionOutcome | null>(null);
+  const [testing, setTesting] = useState(false);
+  const testAbortRef = React.useRef<AbortController | null>(null);
+  const testPrefillSeqRef = React.useRef(0);
+
+  const openTest = (index: number) => {
+    const ep = (draft.endpoints || [])[index];
+    if (!ep || !endpointTest) return;
+    setTestRow(index);
+    setTestURL('');
+    setTestKey('');
+    setTestState(null);
+    setTesting(false);
+    // Best-effort prefill of the draft baseURL from the provider's stored
+    // profile (llm-pi-ai section), guarded against a stale async reply.
+    const seq = ++testPrefillSeqRef.current;
+    Promise.resolve(endpointTest.storedBaseURL?.(ep.provider))
+      .then((url: unknown) => {
+        if (seq !== testPrefillSeqRef.current) return;
+        if (typeof url === 'string' && url.length > 0) setTestURL((prev) => (prev.length === 0 ? url : prev));
+      })
+      .catch(() => {});
+  };
+
+  const closeTest = () => {
+    testAbortRef.current?.abort();
+    testAbortRef.current = null;
+    setTestRow(null);
+    setTestState(null);
+    setTesting(false);
+  };
+
+  const runTest = useCallback(async () => {
+    const ep = testRow === null ? undefined : (draft.endpoints || [])[testRow];
+    if (!ep || !endpointTest || testing) return;
+    const controller = new AbortController();
+    testAbortRef.current = controller;
+    setTesting(true);
+    setTestState(null);
+    try {
+      const outcome = await endpointTest.run(
+        {
+          provider: ep.provider,
+          model: ep.model,
+          baseURL: testURL.trim() || undefined,
+          apiKey: testKey.trim() || undefined
+        },
+        controller.signal
+      );
+      setTestState(outcome);
+    } catch (error) {
+      setTestState({ status: 'fail', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setTesting(false);
+      testAbortRef.current = null;
+    }
+  }, [draft, endpointTest, testRow, testURL, testKey, testing]);
+
+  const renderTestResult = () => {
+    if (testing) return <span className="dso-test-result idle">Probing endpoint…</span>;
+    if (!testState) {
+      return <span className="dso-test-result idle">Run the probe to verify the endpoint answers and serves this model. The draft is never saved.</span>;
+    }
+    if (testState.status === 'unavailable') {
+      return <span className="dso-test-result warn">{testState.message}</span>;
+    }
+    if (testState.status === 'fail') {
+      return (
+        <span className="dso-test-result fail">
+          Probe failed{typeof testState.latencyMs === 'number' ? ` (${testState.latencyMs} ms)` : ''}: {testState.message}
+        </span>
+      );
+    }
+    const modelName = testRow === null ? '' : (draft.endpoints || [])[testRow]?.model ?? '';
+    const warn = testState.modelFound === false || testState.models.length === 0;
+    const modelLine = testState.modelFound === null
+      ? ''
+      : testState.modelFound
+        ? ` Model ${modelName} is served${testState.modelContextWindow !== undefined ? ` (context window ${testState.modelContextWindow} tokens)` : ''}.`
+        : ` Model ${modelName} was NOT in the listing — check the spelling or the endpoint's exposure.`;
+    return (
+      <span className={`dso-test-result ${warn ? 'warn' : 'ok'}`}>
+        Reachable in {testState.latencyMs} ms · {testState.models.length} model(s) advertised.{modelLine}
+      </span>
+    );
+  };
 
   // Sync draft when snap first arrives
   useEffect(() => {
@@ -553,6 +707,16 @@ export function SubagentsOrchestratorSection(props: any) {
                       </td>
                     )}
                     <td>
+                      {endpointTest && (
+                        <button
+                          type="button"
+                          className="dso-test-btn"
+                          disabled={testing && testRow !== idx}
+                          onClick={() => (testRow === idx ? closeTest() : openTest(idx))}
+                        >
+                          {testRow === idx ? 'Close' : 'Test'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="dso-btn-danger"
@@ -567,6 +731,43 @@ export function SubagentsOrchestratorSection(props: any) {
               )}
             </tbody>
           </table>
+
+          {testRow !== null && endpointTest && (
+            <div className="dso-test-panel">
+              <div className="dso-test-line">
+                <span className="dso-test-label">Base URL</span>
+                <input
+                  type="text"
+                  className="dso-test-input"
+                  placeholder="https://…/v1  (prefilled from the provider's stored profile when present)"
+                  value={testURL}
+                  disabled={testing}
+                  onChange={(e) => setTestURL(e.target.value)}
+                />
+              </div>
+              <div className="dso-test-line">
+                <span className="dso-test-label">API key</span>
+                <input
+                  type="password"
+                  className="dso-test-input"
+                  placeholder="leave empty to use the stored key for this provider"
+                  value={testKey}
+                  disabled={testing}
+                  onChange={(e) => setTestKey(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="dso-btn dso-btn-primary"
+                  style={{ padding: '3px 12px', fontSize: 12 }}
+                  disabled={testing}
+                  onClick={runTest}
+                >
+                  {testing ? 'Probing…' : 'Run Probe'}
+                </button>
+              </div>
+              <div>{renderTestResult()}</div>
+            </div>
+          )}
 
           {writable && (
             <div className="dso-add-row">
@@ -706,6 +907,7 @@ export function apply(ctx: any) {
   ensureCss();
   const scope = ctx.settingsScope.bind({ namespace: NS });
   const useScope = bindSnapshotSelector(scope);
+  const endpointTest = bindEndpointTest(ctx);
   ctx.slots.inject('settings.section', () => {
     ctx.slots.register(
       {
@@ -713,7 +915,7 @@ export function apply(ctx: any) {
         id: 'subagents-orchestrator',
         order: 22,
         label: () => 'Subagents Orchestrator',
-        inject: () => ({ useScope, scope })
+        inject: () => ({ useScope, scope, endpointTest })
       },
       SubagentsOrchestratorSection
     );
