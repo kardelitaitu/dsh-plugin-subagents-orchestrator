@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { armSettingsPanel, ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema } from '../src/settings.js';
-import { setConfigForTest, resetConfigForTest, disposeWatcher } from '../src/config.js';
+import { setConfigForTest, resetConfigForTest, disposeWatcher, parseConfigDocument } from '../src/config.js';
 
 interface Registered {
   ns: string;
@@ -108,5 +108,43 @@ describe('orchestratorSettingsSchema', () => {
   it('rejects a wrong-typed panel field instead of coercing it', () => {
     const bad = { enabled: 'yes' };
     expect(() => (orchestratorSettingsSchema as (data: unknown) => unknown)(bad)).toThrow();
+  });
+
+  it('validates endpoint lists item-by-item (Tier C list editing)', () => {
+    const schema = orchestratorSettingsSchema as (data: unknown) => any;
+    const resolved = schema({
+      endpoints: [
+        { provider: 'p1', model: 'm1', weight: 3, enabled: false },
+        { provider: 'p2', model: 'm2' }
+      ],
+      fallback: [{ provider: 'f1', model: 'm3' }]
+    });
+    expect(resolved.endpoints).toEqual([
+      { provider: 'p1', model: 'm1', weight: 3, enabled: false },
+      { provider: 'p2', model: 'm2' }
+    ]);
+    expect(resolved.fallback).toEqual([{ provider: 'f1', model: 'm3' }]);
+  });
+
+  it('a list edit round-trips into a parseable settings.yaml section', () => {
+    // Simulate the settings write path end to end: the panel validates via
+    // the schema, the file provider serializes YAML, our parser reads it.
+    const schema = orchestratorSettingsSchema as (data: unknown) => any;
+    const edited = schema({
+      enabled: true,
+      strategy: 'weighted',
+      endpoints: [{ provider: 'p1', model: 'm1', weight: 2 }, { provider: 'p2', model: 'm2', enabled: false }],
+      ui: { toasts: false, panel: true }
+    });
+    // The resolver output must feed parseConfigDocument unchanged.
+    const reparsed = parseConfigDocument({ 'subagents-orchestrator': edited });
+    expect(reparsed?.endpoints).toEqual(edited.endpoints);
+    expect(reparsed?.strategy).toBe('weighted');
+    expect(reparsed?.ui).toEqual({ toasts: false, panel: true });
+  });
+
+  it('an item missing its required provider fails loudly, not silently', () => {
+    const schema = orchestratorSettingsSchema as (data: unknown) => unknown;
+    expect(() => schema({ endpoints: [{ model: 'no-provider' }] })).toThrow();
   });
 });

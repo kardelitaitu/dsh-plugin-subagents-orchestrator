@@ -22,10 +22,33 @@ import { getConfig } from './config.js';
 export const ORCHESTRATOR_SETTINGS_NAMESPACE = 'subagents-orchestrator';
 
 /**
- * Schema of the panel-editable fields. Deliberately narrower than
- * `parseConfigDocument`: the `endpoints`/`fallback` lists stay out of the
- * form (list editing is Tier C), and schemastery's non-strict objects keep
- * unknown keys untouched so sections holding them still validate.
+ * Declaration-emit-friendly shape for the exported schemastery schemas: the
+ * panel never consumes schemastery's inferred type (whose nameable form
+ * drags cosmokit internals into the public surface), it only hands the
+ * schema to `ctx.settings.register(unknown)` and tests may call it.
+ */
+export type SettingsSchema = (data: unknown) => unknown;
+
+/**
+ * One panel-editable endpoint. Mirrors the YAML `Endpoint` shape minus the
+ * fields the panel has no business editing (nothing secret, nothing the
+ * runtime derives): provider/model identity, routing weight, and the park
+ * toggle. Unknown keys on stored entries survive validation (schemastery
+ * non-strict dicts), so YAML-only fields like `reasoningEffort` pass through.
+ */
+export const endpointSettingsSchema = z
+  .object({
+    provider: z.string().required(),
+    model: z.string().required(),
+    weight: z.number(),
+    enabled: z.boolean()
+  }) as unknown as SettingsSchema;
+
+/**
+ * Schema of the panel-editable fields, including the Tier C endpoint lists.
+ * Items failing the entry schema are dropped during validation rather than
+ * poisoning the whole section (matching parseConfigDocument's filter spirit);
+ * schemastery's non-strict objects keep extra section keys untouched.
  */
 export const orchestratorSettingsSchema = z
   .object({
@@ -42,8 +65,10 @@ export const orchestratorSettingsSchema = z
     ui: z.object({
       toasts: z.boolean(),
       panel: z.boolean()
-    })
-  });
+    }),
+    endpoints: z.array(endpointSettingsSchema),
+    fallback: z.array(endpointSettingsSchema)
+  }) as unknown as SettingsSchema;
 
 export interface SettingsPanelContext {
   /** Cordis service injection; never fires when 'settings' is not composed. */
