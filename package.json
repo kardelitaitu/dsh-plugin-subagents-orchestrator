@@ -61,6 +61,7 @@
     "report": "node scripts/telemetry-report.mjs"
   },
   "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2",
     "js-yaml": "^5.4.1"
   },
   "devDependencies": {

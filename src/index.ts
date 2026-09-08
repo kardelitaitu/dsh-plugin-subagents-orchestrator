@@ -18,6 +18,7 @@ import {
   initWatcher,
   disposeWatcher
 } from './config.js';
+import { armSettingsPanel } from './settings.js';
 import { pickNextEndpoint } from './balancer.js';
 import { defaultCircuitBreaker } from './health.js';
 import { extractCooldownHintMs } from './ratelimit.js';
@@ -113,6 +114,10 @@ export function apply(ctx: CordisContext): void {
 
   // Start zero-latency in-memory config cache & file watcher
   initWatcher();
+
+  // Tier B: opt-in settings panel (ui.panel: true). Reads the just-loaded
+  // cache; registers the settings namespace only when the user asked for it.
+  armSettingsPanel(ctx);
 
   /**
    * Wait out the configured retry interval before handing the host the retry
