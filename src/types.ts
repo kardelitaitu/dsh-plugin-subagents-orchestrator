@@ -54,7 +54,13 @@ export interface OrchestratorConfig {
 }
 
 export interface OrchestratorUiConfig {
-  /** Render a toast when a subagent fails over to another endpoint. */
+  /**
+   * Opt-in failover notice: when a subagent fails over, inject a collapsed
+   * plugin-notice row into its transcript (`agent.inject`, non-waking) so
+   * the retried step — and the session view — show the endpoint switch.
+   * The web-client push toast remains upstream-blocked (closed
+   * API_REMOTE_FORWARDED_EVENTS allowlist in DSH 0.1.1/0.1.2).
+   */
   toasts?: boolean;
   /** Register the orchestrator panel in the DSH settings surface. */
   panel?: boolean;
@@ -73,6 +79,12 @@ export interface AgentSession {
 export interface Agent {
   id: string;
   session?: AgentSession;
+  /**
+   * Queue model-facing context for the next pre-step WITHOUT waking the
+   * driver (dsh-agent `Agent.inject`). Present on live host agents; absent
+   * on mocks/older hosts, so every caller must feature-detect.
+   */
+  inject?: (message: unknown) => void;
   [key: string]: unknown;
 }
 

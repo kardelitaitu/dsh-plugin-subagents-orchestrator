@@ -22,8 +22,9 @@ import { armSettingsPanel } from './settings.js';
 import { pickNextEndpoint } from './balancer.js';
 import { defaultCircuitBreaker } from './health.js';
 import { extractCooldownHintMs } from './ratelimit.js';
-import { recordRequest, recordFailure, recordFailover, resetTelemetry, setDebugLogging, forgetAgent } from './telemetry.js';
+import { recordRequest, recordFailure, recordFailover, resetTelemetry, setDebugLogging, forgetAgent, recordTurnSuccess, recordTokenSample, poisonSuccessSpan } from './telemetry.js';
 import { flushTelemetryToDisk } from './persist.js';
+import { deliverFailoverNotice } from './notices.js';
 
 export const name = 'dsh-plugin-subagents-orchestrator';
 
@@ -253,8 +254,17 @@ export function apply(ctx: CordisContext): void {
       // resurrect failover handling for agents attributed before the disable.
       // Failover defaults to on (README contract): only an explicit
       // `failover: false` disables it.
-      if (!config || config.enabled === false || config.failover === false) return next();
+      if (!config || config.enabled === false) return next();
       refreshTelemetryDebug();
+
+      // Poison the open success span for THIS failed (turn, step) before any
+      // defer path — independent of the failover switch: telemetry stays
+      // truthful even with `failover: false`.
+      if (payload.agent?.id) poisonSuccessSpan(payload.agent.id, payload.turn, payload.step);
+
+      // Failover defaults to on; only an explicit `failover: false` disables
+      // the walk (and everything below it).
+      if (config.failover === false) return next();
 
       // Tiered candidate list (v2): primaries first, then the fallback rescue
       // chain. Without a rescue chain this is exactly the historical pool —
@@ -299,7 +309,7 @@ export function apply(ctx: CordisContext): void {
         hintMs !== null ? 1 : config.maxFailures || 3,
         hintMs ?? config.cooldownMs ?? 60000
       );
-      recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined);
+      recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined, Date.now(), { turn: payload.turn, step: payload.step });
 
       // The walk is spent for this incident: keep accounting the failure
       // (breaker + telemetry above) but defer the decision - never re-plan a
@@ -464,17 +474,33 @@ export function apply(ctx: CordisContext): void {
         return { kind: 'retry' };
       }
 
+      const target = nextTier === 'fallback' ? fallbackChain[nextIndex] : endpoints[nextIndex];
+
       pendingFailovers.set(agent.id, {
         count: current.count + 1,
         index: nextIndex,
         tier: nextTier
       });
 
-      recordFailover(
-        agent.id,
-        currentEndpoint,
-        nextTier === 'fallback' ? fallbackChain[nextIndex] : endpoints[nextIndex]
-      );
+      recordFailover(agent.id, currentEndpoint, target);
+
+      // ui.toasts (opt-in): deliver a model-facing failover notice into the
+      // failed agent's inbox. `agent.inject` queues context for the retried
+      // step's pre-step WITHOUT waking the driver, so the notice is consumed
+      // exactly when the request is rewritten onto `target`. Delivery is
+      // best-effort — an unavailable dsh-llm or a broken inject degrades to
+      // a debug line, never to a failed failover.
+      if (config.ui?.toasts === true) {
+        const delivery = await deliverFailoverNotice(agent, {
+          from: currentEndpoint,
+          to: target,
+          ...(failure.code ? { code: failure.code } : {}),
+          ...(hintMs !== null ? { hintMs } : {})
+        });
+        if (config.debug && delivery !== 'delivered') {
+          console.debug(`subagents-orchestrator: failover notice skipped (${delivery})`);
+        }
+      }
 
       return { kind: 'retry' };
     } catch (error) {
@@ -490,7 +516,7 @@ export function apply(ctx: CordisContext): void {
   });
 
   // 3. Apply the fallback endpoint onto the retried request
-  const disposeRequest = ctx.on('agent/request', async (payload: { agent: Agent; [key: string]: any }, next: () => any) => {
+  const disposeRequest = ctx.on('agent/request', async (payload: { agent: Agent; turn?: unknown; step?: unknown; [key: string]: any }, next: () => any) => {
     const { agent } = payload;
     if (!isSubagent(agent)) return next();
 
@@ -516,7 +542,7 @@ export function apply(ctx: CordisContext): void {
           ...(typeof seed.reasoningEffort === 'string' ? { reasoningEffort: seed.reasoningEffort } : {})
         };
         activeEndpoints.set(agent.id, assigned);
-        recordRequest(agent.id, assigned);
+        recordRequest(agent.id, assigned, Date.now(), { turn: payload.turn, step: payload.step });
       }
       return seed;
     }
@@ -542,7 +568,7 @@ export function apply(ctx: CordisContext): void {
     if (!target) return next();
 
     activeEndpoints.set(agent.id, target);
-    recordRequest(agent.id, target);
+    recordRequest(agent.id, target, Date.now(), { turn: payload.turn, step: payload.step });
 
     const seed = (await next()) as RequestSeed | null | undefined;
     if (!seed) return seed;
@@ -564,9 +590,53 @@ export function apply(ctx: CordisContext): void {
       exhaustedAgents.delete(agent.id);
       // Success-path latency bookkeeping has no other consumer: without
       // this release every successful subagent leaks its request-start
-      // entry for the host's whole lifetime.
+      // entry and its open success span for the host's whole lifetime.
       forgetAgent(agent.id);
     }
+  });
+
+  // 4. Success-side step spans (Phase 3): the host dispatch layer still has
+  //    no request-completion event, but the agent loop closes every turn at
+  //    `agent/turn-stopping` — the model owes no response and no tool is
+  //    live, so the turn's last request COMPLETED. That boundary closes the
+  //    agent's newest open span as a success sample (a span opened at
+  //    `agent/request` whose (turn, step) failed is poisoned by
+  //    `recordFailure` and dropped instead). Steps superseded by a later
+  //    request close inside recordRequest itself. Token deltas come from the
+  //    optional `ctx.tokenMeter` composition (`measure(session).totalTokens`,
+  //    provider-reported usage replayed from the durable log); without the
+  //    meter, spans record latency only.
+  const disposeTurnStopping = ctx.on(
+    'agent/turn-stopping',
+    async (payload: { agent?: Agent } | undefined): Promise<void> => {
+      const agent = payload?.agent;
+      if (!agent?.id) return;
+      const config = getConfig();
+      if (!config || config.enabled === false) return;
+      refreshTelemetryDebug();
+      let tokens: number | undefined;
+      try {
+        const meter = (ctx as { tokenMeter?: { measure?: (session: unknown) => unknown } }).tokenMeter;
+        if (meter && typeof meter.measure === 'function' && agent.session) {
+          const snapshot = (await meter.measure(agent.session)) as { totalTokens?: unknown } | undefined;
+          const total = snapshot?.totalTokens;
+          if (typeof total === 'number' && Number.isFinite(total)) {
+            tokens = recordTokenSample(agent.id, total) ?? undefined;
+          }
+        }
+      } catch {
+        // A misbehaving meter must not cost us the latency sample.
+        tokens = undefined;
+      }
+      recordTurnSuccess(agent.id, tokens);
+    }
+  );
+
+  // 5. Step/turn errors poison the agent's open success span so a turn that
+  //    stopped on an error can never be sampled as a success.
+  const disposeError = ctx.on('agent/error', (payload: { agent?: Agent; turn?: unknown; step?: unknown } | undefined) => {
+    const agent = payload?.agent;
+    if (agent?.id) poisonSuccessSpan(agent.id, payload?.turn, payload?.step);
   });
 
   ctx.effect(() => async () => {
@@ -574,6 +644,8 @@ export function apply(ctx: CordisContext): void {
     disposeRequestError();
     disposeRequest();
     disposeDisposed();
+    disposeTurnStopping();
+    disposeError();
     // Durable diagnostics (opt-in via persistTelemetry): drain the event ring
     // and snapshot endpoint counters BEFORE the telemetry state is reset.
     if (getConfig()?.persistTelemetry === true) {

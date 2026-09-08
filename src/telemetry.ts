@@ -10,7 +10,7 @@
  * `console.debug` as a single JSON line suitable for log aggregation.
  */
 
-export type TelemetryEventType = 'request' | 'failure' | 'failover';
+export type TelemetryEventType = 'request' | 'failure' | 'failover' | 'success';
 
 export interface TelemetryEndpointRef {
   provider: string;
@@ -31,6 +31,10 @@ export interface TelemetryEvent {
   hintMs?: number;
   /** Request-to-failure span in ms, when a matching request start was seen. */
   latencyMs?: number;
+  /** Success-side step span in ms (request build -> next boundary). */
+  successLatencyMs?: number;
+  /** Provider-reported/measured tokens attributed to a closed success span. */
+  tokens?: number;
 }
 
 export interface EndpointStats {
@@ -55,6 +59,18 @@ export interface EndpointStats {
   latencyMaxMs: number;
   /** Most recent failure latency (ms), or null before the first sample. */
   lastLatencyMs: number | null;
+  /** Completed (successful) attempts attributed to this endpoint. */
+  successes: number;
+  /** Success-span samples: request build -> next same-agent boundary. */
+  successLatencySamples: number;
+  /** Sum of success-span samples (ms); divide by successLatencySamples for the mean. */
+  successLatencyTotalMs: number;
+  /** Longest observed success span (ms). */
+  successLatencyMaxMs: number;
+  /** Most recent success span (ms), or null before the first sample. */
+  lastSuccessLatencyMs: number | null;
+  /** Sum of measured token deltas attributed to this endpoint's closed spans. */
+  tokensTotal: number;
 }
 
 /** Recent-event ring buffer size. Small on purpose: diagnostics, not an audit log. */
@@ -62,6 +78,33 @@ export const MAX_EVENT_BUFFER = 100;
 
 const statsByKey = new Map<string, EndpointStats>();
 const eventBuffer: TelemetryEvent[] = [];
+
+/**
+ * Open success spans per agent. The host dispatch layer exposes no
+ * request-completion event, so a span is opened at `agent/request` (same
+ * attribution point as the failure-latency start entry) and closed at the
+ * NEXT same-agent boundary — another `agent/request` for a later step or the
+ * turn close (`agent/turn-stopping`). The span therefore covers request
+ * build through the whole step's model call, including same-endpoint retry
+ * waits we imposed; it is an upper bound on raw provider latency by design.
+ */
+interface SuccessSpan {
+  endpoint: TelemetryEndpointRef;
+  at: number;
+  turn: unknown;
+  step: unknown;
+  /** Token accounting for the span: last provider-reported/measured total seen. */
+  tokenMark: number | null;
+  /** Token deltas sampled into this span, awaiting the close that attributes them. */
+  pendingTokens?: number;
+  /**
+   * Set when the span's own (turn, step) request failed. A poisoned span is
+   * never sampled as a success — it is silently dropped at the next
+   * boundary, so a turn that closed on an error cannot inflate successes.
+   */
+  failed?: boolean;
+}
+const successSpans = new Map<string, SuccessSpan>();
 
 /**
  * In-flight request starts per agent, for failure-latency attribution: the
@@ -116,7 +159,13 @@ function ensureStats(endpoint: TelemetryEndpointRef): EndpointStats {
       latencySamples: 0,
       latencyTotalMs: 0,
       latencyMaxMs: 0,
-      lastLatencyMs: null
+      lastLatencyMs: null,
+      successes: 0,
+      successLatencySamples: 0,
+      successLatencyTotalMs: 0,
+      successLatencyMaxMs: 0,
+      lastSuccessLatencyMs: null,
+      tokensTotal: 0
     };
     statsByKey.set(key, entry);
   }
@@ -124,10 +173,146 @@ function ensureStats(endpoint: TelemetryEndpointRef): EndpointStats {
 }
 
 /** Record a request observed routed to `endpoint` for `agentId`. */
-export function recordRequest(agentId: string, endpoint: TelemetryEndpointRef, now: number = Date.now()): void {
+export function recordRequest(
+  agentId: string,
+  endpoint: TelemetryEndpointRef,
+  now: number = Date.now(),
+  meta?: { turn?: unknown; step?: unknown }
+): void {
   ensureStats(endpoint).requests += 1;
   requestStarts.set(agentId, { endpoint: { ...endpoint }, at: now });
   emit({ at: now, type: 'request', agentId, to: { ...endpoint } });
+  openSuccessSpan(agentId, endpoint, now, meta);
+}
+
+/** Numeric guard for host turn/step values. */
+function isStepNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/** Open a success span, closing any older span of the same agent first. */
+function openSuccessSpan(
+  agentId: string,
+  endpoint: TelemetryEndpointRef,
+  now: number,
+  meta?: { turn?: unknown; step?: unknown }
+): void {
+  const previous = successSpans.get(agentId);
+  if (previous) {
+    const advanced =
+      isStepNumber(meta?.turn) &&
+      isStepNumber(previous.turn) &&
+      (meta!.turn as number) > (previous.turn as number)
+        ? true
+        : isStepNumber(meta?.turn) &&
+          isStepNumber(previous.turn) &&
+          isStepNumber(meta?.step) &&
+          isStepNumber(previous.step) &&
+          (meta!.turn as number) === (previous.turn as number) &&
+          (meta!.step as number) > (previous.step as number);
+    if (advanced) {
+      // The previous step finished its model call without surfacing a
+      // failure to us: close its span as a success, attributed to the
+      // endpoint the span was actually served on. A poisoned span (its
+      // request failed) is dropped instead — the step never succeeded.
+      successSpans.delete(agentId);
+      if (!previous.failed) {
+        sampleSuccess(agentId, previous.endpoint, previous, now, previous.pendingTokens);
+      }
+    }
+    // A same-step re-dispatch (host-driven retry, possibly rewritten onto a
+    // failover target by the orchestrator) is NOT a success: the old span is
+    // simply replaced below, and failures already consumed the failure-side
+    // entry via recordFailure.
+  }
+  successSpans.set(agentId, {
+    endpoint: { ...endpoint },
+    at: now,
+    turn: meta?.turn,
+    step: meta?.step,
+    // The cumulative mark carries across spans of one agent so mid-turn
+    // endpoint switches never double-count tokens; the pending delta does
+    // NOT carry — a replaced span's tokens were its own attempt's.
+    tokenMark: previous?.tokenMark ?? null
+  });
+}
+
+/**
+ * Record a token sample for the agent's open success span.
+ *
+ * `cumulativeTokens` is the provider-reported total from the durable session
+ * meter (e.g. `ctx.tokenMeter.measure(session).totalTokens`). The delta since
+ * the span's previous mark is attributed to the span's endpoint; the mark
+ * persists across span replacement within one agent so mid-turn retries do
+ * not double-count tokens.
+ */
+export function recordTokenSample(agentId: string, cumulativeTokens: number, now: number = Date.now()): number | null {
+  const span = successSpans.get(agentId);
+  if (!span || !Number.isFinite(cumulativeTokens)) return null;
+  const delta = span.tokenMark === null ? cumulativeTokens : Math.max(0, cumulativeTokens - span.tokenMark);
+  span.tokenMark = cumulativeTokens;
+  span.pendingTokens = (span.pendingTokens ?? 0) + delta;
+  return delta;
+}
+
+/**
+ * Close the agent's open success span: the turn stopped cleanly (`agent/
+ * turn-stopping`), so the span's request completed. `tokens` is the delta
+ * computed by recordTokenSample (undefined when no meter is composed).
+ * A poisoned span is dropped without sampling — the turn stopped but the
+ * span's own request failed, so there is no success to record.
+ */
+export function recordTurnSuccess(agentId: string, tokens: number | undefined, now: number = Date.now()): boolean {
+  const span = successSpans.get(agentId);
+  if (!span) return false;
+  successSpans.delete(agentId);
+  if (!span.failed) {
+    // Explicit tokens win; otherwise the span's own sampled deltas attribute.
+    const effective = tokens !== undefined ? tokens : span.pendingTokens;
+    sampleSuccess(agentId, span.endpoint, span, now, effective);
+  }
+  return true;
+}
+
+/**
+ * Mark the agent's open success span as failed so no later boundary samples
+ * it as a success. Called for request-level failures whose (turn, step)
+ * match the open span, and for step/turn errors (`agent/error`).
+ */
+export function poisonSuccessSpan(agentId: string, turn?: unknown, step?: unknown): void {
+  const span = successSpans.get(agentId);
+  if (!span) return;
+  if (turn === undefined && step === undefined) {
+    span.failed = true;
+    return;
+  }
+  if (span.turn === turn && span.step === step) span.failed = true;
+}
+
+/** Sample one closed success span into the endpoint stats + event ring. */
+function sampleSuccess(
+  agentId: string,
+  endpoint: TelemetryEndpointRef,
+  span: { at: number },
+  now: number,
+  tokens: number | undefined
+): void {
+  const entry = ensureStats(endpoint);
+  const latencyMs = Math.max(0, now - span.at);
+  entry.successes += 1;
+  entry.successLatencySamples += 1;
+  entry.successLatencyTotalMs += latencyMs;
+  entry.successLatencyMaxMs = Math.max(entry.successLatencyMaxMs, latencyMs);
+  entry.lastSuccessLatencyMs = latencyMs;
+  if (tokens !== undefined) entry.tokensTotal += Math.max(0, tokens);
+  emit({
+    at: now,
+    type: 'success',
+    agentId,
+    to: { ...endpoint },
+    successLatencyMs: latencyMs,
+    ...(tokens !== undefined ? { tokens } : {})
+  });
 }
 
 /**
@@ -141,9 +326,17 @@ export function getInFlightRequests(): number {
   return requestStarts.size;
 }
 
-/** Release an agent's in-flight request-start entry (idempotent, safe for unknown ids). */
+/**
+ * Release all of an agent's in-flight entries (idempotent, safe for unknown
+ * ids). Called from `agent/disposed`: without this release every successful
+ * subagent would leak both its failure-latency start entry and its open
+ * success span for the host's whole lifetime. A span open at dispose time is
+ * deliberately NOT sampled — an aborted/disposed agent completed nothing we
+ * can honestly call a success.
+ */
 export function forgetAgent(agentId: string): void {
   requestStarts.delete(agentId);
+  successSpans.delete(agentId);
 }
 
 /** Record a failure attributed to `endpoint`, including any cooldown hint that was applied. */
@@ -152,13 +345,17 @@ export function recordFailure(
   endpoint: TelemetryEndpointRef,
   code: string,
   hintMs?: number,
-  now: number = Date.now()
+  now: number = Date.now(),
+  meta?: { turn?: unknown; step?: unknown }
 ): void {
   const entry = ensureStats(endpoint);
   entry.failures += 1;
   if (hintMs !== undefined) entry.cooldownHints += 1;
   entry.lastFailureAt = now;
   entry.lastFailureCode = code;
+  // The span for the failed (turn, step) must never be sampled as a success
+  // later — poison it up front (a retry re-opens a fresh span).
+  poisonSuccessSpan(agentId, meta?.turn, meta?.step);
 
   // Failure latency: the span from the request build (recordRequest) to this
   // failure. One sample per request — the start entry is consumed here, so a
@@ -222,6 +419,7 @@ export function resetTelemetry(): void {
   statsByKey.clear();
   eventBuffer.length = 0;
   requestStarts.clear();
+  successSpans.clear();
   debugMode = 'auto';
 }
 
