@@ -63,9 +63,9 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 ## 🧭 Candidate: Pool / Fallback endpoint modes (v2)
 
-- [ ] Review `DESIGN-pool-fallback.md` and settle the four open questions
+- [x] Review `DESIGN-pool-fallback.md` - owner approved all four proposals
   (cap accounting, flapping-guard defaults, fallback tier under pool mode,
   failback probe traffic).
-- [ ] Phase A — config schema + mode/strategy split + ordered fallback chain.
-- [ ] Phase B — breaker-based auto-failback + flapping guard.
-- [ ] Phase C — `totalSubagents` pass-through concurrency cap.
+- [x] Phase A — config schema + mode/strategy split + ordered fallback chain.
+- [x] Phase B — breaker-based auto-failback (healthy-first tier walk) + flapping guard.
+- [x] Phase C — `totalSubagents` pass-through concurrency cap.

@@ -1,8 +1,10 @@
 # Design Proposal: Pool / Fallback endpoint modes (v2)
 
-**Status:** DRAFT — awaiting product decisions. Nothing here is implemented;
-this document exists so the parked redesign from the settings.yaml discussion
-becomes reviewable as a concrete spec.
+**Status:** ACCEPTED (owner: implement with your proposals) and implemented.
+Phase A (config + mode/strategy split + tiered chain), Phase B (flapping guard
+via breaker trip history) and Phase C (totalSubagents pass-through cap) are
+landed; the four open questions below were resolved with the owner-approved
+proposals marked inline.
 
 ---
 

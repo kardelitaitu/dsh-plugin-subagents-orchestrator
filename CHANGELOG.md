@@ -52,6 +52,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   after a crash; missing or corrupt stores degrade to a location report.
 - CI runs `npm pack --dry-run` after build, so packaging regressions
   (files-manifest omissions) fail the build instead of the publish.
+- Pool / fallback endpoint modes (v2, `mode` + `fallback` config): ordered
+  rescue chain descending after the primaries, healthy-first tier walk with
+  automatic failback through breaker probation, and a flapping guard that
+  extends the cooldown of rapidly re-tripping endpoints.
+- `totalSubagents` soft concurrency cap: starts at or over the cap pass
+  through unrouted - never rejected, queued or stalled - and routing resumes
+  when a slot is freed.
 
 ### Changed
 

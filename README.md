@@ -70,6 +70,9 @@ subagents-orchestrator:
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | `true` | Enable or disable subagent orchestration |
 | `strategy` | `string` | `"round-robin"` | Distribution algorithm: `"round-robin"`, `"random"`, or `"weighted"` |
+| `mode` | `string` | `"pool"` | Endpoint handling mode: `pool` distributes across `endpoints` with `strategy`; `fallback` sticks to the primary set and descends the ordered rescue chain only when the current endpoint is abandoned. A fallback mode without usable rescue entries degrades to `pool` |
+| `fallback` | `array` | `[]` | Ordered rescue chain `{ provider, model, ... }` (same shape as endpoints). In fallback mode it is tried after the primaries; in pool mode it is only a degradation tier used when every primary is tripped |
+| `totalSubagents` | `number` | `unbounded` | Soft concurrency cap on routed starts. Starts at or over the cap pass through unrouted - never rejected, queued or stalled - and a freed slot (agent disposed) resumes routing |
 | `failover` | `boolean` | `true` | Automatically failover to next endpoint on rate limits/errors |
 | `cooldownMs` | `number` | `60000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
 | `maxFailures` | `number` | `3` | Consecutive failures before an endpoint trips |
