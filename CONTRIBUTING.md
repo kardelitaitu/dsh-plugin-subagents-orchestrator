@@ -74,10 +74,10 @@ exists so independent work streams never corrupt each other.
 
 Publishing is one tag push; everything before it is local and checkable.
 
-`@B@`sh
+```sh
 pnpm run hooks:install     # once per clone (no auto-install; see .githooks/README.md)
 pnpm run release:check     # publish preflight
-`@B@`
+```
 
 1. **Land the work on `main`.** The pre-push hook runs typecheck + the suite so a
    red tree cannot leave the machine; CI is still the source of truth.
@@ -118,6 +118,36 @@ Rules that keep a release honest:
   the next patch version; do not move or re-point the tag.
 - `npm deprecate` is the only rollback: a published version cannot be deleted
   inside the 72-hour window, so `npm unpublish` is not part of this process.
+
+### When a GitHub Actions bump lands
+
+Dependabot opens these as ordinary pull requests, and CI on them proves only
+that `verify` still passes - `.github/workflows/release.yml` never runs on a
+pull request. Merge them one at a time and watch the two artifact jobs
+(`pack-release-artifact` -> `unpack-release-artifact`), which exist to cover
+the upload/download pair the publish job depends on. Facts from upstream, as
+of the pending bumps:
+
+- `actions/download-artifact` v8 makes digest mismatches an error instead of a
+  warning and no longer assumes every artifact is zipped. Together with
+  `actions/upload-artifact` v7 (direct, unzipped single-file uploads), a
+  silent behaviour change here would surface as a corrupt or missing tarball
+  in the publish job - the exact failure these two jobs are for.
+- `actions/upload-artifact` v5+ and `download-artifact` v6+ run on Node 24 and
+  need an Actions runner >= 2.327.1. GitHub-hosted runners are fine; a
+  self-hosted runner would fail the workflow before any of our steps.
+- `actions/setup-node` v5 auto-enables dependency caching when
+  `packageManager` is present, v6 narrowed that to npm only, and v7 removed
+  the dummy `NODE_AUTH_TOKEN` export. That export is the reason the publish
+  job runs without `registry-url`: an earlier major writes an `_authToken`
+  placeholder into the npmrc whenever `registry-url` is set, and an explicit
+  token entry outranks the OIDC identity npm provenance needs. The gate job still
+  passes `registry-url` (it publishes nothing, and the preflight registry probe
+  wants the canonical host); when you bump setup-node, re-justify that difference
+  instead of copying it forward.
+- `pnpm/action-setup` v6 ships pnpm 11 and its README now points at the
+  successor `pnpm/setup` action. The `version: 10` pin in both workflows is
+  what keeps CI matching the pnpm 10 store layout the preflight smoke-tests.
 
 ## Host-plane safety invariants
 
