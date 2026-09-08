@@ -7,3 +7,4 @@ pnpm-debug.log*
 Thumbs.db
 .codebase-memory/
 *.log
+*.tgz
