@@ -56,7 +56,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "report": "node scripts/telemetry-report.mjs"
   },
   "dependencies": {
     "js-yaml": "^5.4.1"

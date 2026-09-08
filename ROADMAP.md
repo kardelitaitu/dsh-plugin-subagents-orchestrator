@@ -42,6 +42,7 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
   - [ ] Success-side response latency and token throughput: the host dispatch layer exposes no request-completion event (`agent/request` builds the config, failures surface via `agent/request-error`), so success metrics need a host-side completion signal first.
 - [x] **Log Integration**:
   - Structured debug logging (one JSON line per routing event via `console.debug`), enabled by the config `debug` flag or `DSH_ORCHESTRATOR_DEBUG=1` — reachable through `dsh` CLI diagnostics.
+  - Offline diagnostics chain: live snapshot via the `./diagnostics` subpath, opt-in durable persistence (`persistTelemetry`) and the `scripts/telemetry-report.mjs` reader (see `ARCHITECTURE.md` §5; runs `pnpm report`).
 
 ---
 
@@ -57,3 +58,14 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 - [x] Add unit and integration tests simulating subagent session execution.
 - [ ] Publish to npm / open-source repository for community use.
+
+---
+
+## 🧭 Candidate: Pool / Fallback endpoint modes (v2)
+
+- [ ] Review `DESIGN-pool-fallback.md` and settle the four open questions
+  (cap accounting, flapping-guard defaults, fallback tier under pool mode,
+  failback probe traffic).
+- [ ] Phase A — config schema + mode/strategy split + ordered fallback chain.
+- [ ] Phase B — breaker-based auto-failback + flapping guard.
+- [ ] Phase C — `totalSubagents` pass-through concurrency cap.
