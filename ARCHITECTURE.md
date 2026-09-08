@@ -159,12 +159,15 @@ events for debug output. Two independent read paths exist:
 
 With `persistTelemetry: true` (`src/config.ts` schema-gated), the
 dispose effect calls `flushTelemetryToDisk()` (`src/persist.ts`) once:
-drain the ring buffer into `events-YYYY-MM-DD.jsonl` (append-only,
+append the buffered events into `events-YYYY-MM-DD.jsonl` (append-only,
 day-bucketed, 7-day retention), atomically replace `endpoints.json`
-(tmp+rename), prune old buckets. Ordering matters: the flush runs
+(tmp+rename), prune old buckets. Ordering matters twice: the flush runs
 **before** `resetTelemetry()` in the dispose effect, or the data would be
-gone. Failure semantics: nothing throws — unwritable roots yield zeroed
-counters; an empty buffer writes nothing, not even the storage root.
+gone; and inside the flush the buffer is consumed only **after** the
+append fully succeeded (peek → append → consume), so a failed write
+leaves the events buffered for the next flush. Failure semantics:
+nothing throws — unwritable roots yield zeroed counters and an intact
+buffer; an empty buffer writes nothing, not even the storage root.
 
 ### Stage 3 — consumption (out of process)
 
