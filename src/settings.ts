@@ -68,9 +68,10 @@ export function armSettingsPanel(ctx: SettingsPanelContext): boolean {
   if (config?.ui?.panel !== true) return false;
 
   ctx.inject(['settings'], (sctx) => {
-    if (!sctx.settings) return;
+    const settings = (sctx as { settings?: SettingsService } | null)?.settings;
+    if (!settings) return;
     try {
-      sctx.settings.register(ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, { base: {} });
+      settings.register(ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, { base: {} });
     } catch {
       // A stored section our schema rejects would fail registration loud;
       // degrade to the plain YAML path instead of failing the plugin.
