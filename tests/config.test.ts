@@ -188,6 +188,23 @@ describe('Config Schema Parsing', () => {
     expect(parsed).toEqual({});
   });
 
+  it('should parse the ui block and drop unknown/wrongly-typed ui fields', () => {
+    const parsed = parseConfigDocument({
+      'subagents-orchestrator': {
+        ui: { toasts: true, panel: false, popups: 'yes', modal: 1 }
+      }
+    });
+    expect(parsed?.ui).toEqual({ toasts: true, panel: false });
+
+    // An empty ui block is a recognized opt-in anchor, kept as an object.
+    expect(parseConfigDocument({ 'subagents-orchestrator': { ui: {} } })?.ui).toEqual({});
+
+    // Wrongly-typed ui blocks are dropped, never coerced.
+    expect(parseConfigDocument({ 'subagents-orchestrator': { ui: 'toasts' } })?.ui).toBeUndefined();
+    expect(parseConfigDocument({ 'subagents-orchestrator': { ui: ['toasts'] } })?.ui).toBeUndefined();
+    expect(parseConfigDocument({ 'subagents-orchestrator': { ui: null } })?.ui).toBeUndefined();
+  });
+
   it('should return null for non-object yaml documents', () => {
     expect(parseConfigDocument(null)).toBeNull();
     expect(parseConfigDocument('a string')).toBeNull();

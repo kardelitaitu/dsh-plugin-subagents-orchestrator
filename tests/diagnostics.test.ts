@@ -79,6 +79,8 @@ describe('Diagnostics Snapshot', () => {
       retryIntervalMinMs: 250,
       retryIntervalMaxMs: 750
     });
+    // No ui block configured: both surfaces read as off.
+    expect(snapshot.ui).toEqual({ toasts: false, panel: false });
     expect(snapshot.effectivePoolSize).toBe(2); // p2 is parked
     expect(snapshot.endpoints.map((e) => [e.key, e.inPool])).toEqual([
       ['p1::m1', true],
@@ -122,6 +124,17 @@ describe('Diagnostics Snapshot', () => {
     expect(endpoint.breaker.healthy).toBe(true); // probation, derived only
     expect(endpoint.breaker.trippedUntil).toBe(6_000); // status untouched
     expect(endpoint.breaker.consecutiveFailures).toBe(1); // probationary memory kept
+  });
+
+  it('surfaces opted-in ui gates from the config', () => {
+    setConfigForTest({
+      enabled: true,
+      ui: { toasts: true, panel: true },
+      endpoints: [{ provider: 'p1', model: 'm1' }]
+    });
+
+    const snapshot = getDiagnosticsSnapshot(3000);
+    expect(snapshot.ui).toEqual({ toasts: true, panel: true });
   });
 
   it('aggregates telemetry counters per endpoint key', () => {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { load } from 'js-yaml';
-import type { OrchestratorConfig, Endpoint, RoutingStrategy } from './types.js';
+import type { OrchestratorConfig, OrchestratorUiConfig, Endpoint, RoutingStrategy } from './types.js';
 
 export const DEFAULT_SETTINGS_PATH = path.join(os.homedir(), '.dsh', 'settings.yaml');
 
@@ -18,6 +18,14 @@ const VALID_STRATEGIES: readonly string[] = ['round-robin', 'random', 'weighted'
 
 let cachedConfig: OrchestratorConfig | null = null;
 let cachedEndpoints: Endpoint[] = [];
+/**
+ * Effective handling mode (v2). `mode: fallback` with no usable rescue
+ * entries (missing list, every entry invalid, or every entry parked)
+ * degrades to `pool` — a rescue chain with no rescuers must not become a
+ * single point of failure.
+ */
+let cachedMode: 'pool' | 'fallback' = 'pool';
+let cachedFallbackChain: Endpoint[] = [];
 let watcher: fs.FSWatcher | null = null;
 let debounceTimer: NodeJS.Timeout | null = null;
 let activeFilePath: string = DEFAULT_SETTINGS_PATH;
@@ -101,6 +109,18 @@ export function parseConfigDocument(doc: unknown): OrchestratorConfig | null {
     config.strategy = strategy as RoutingStrategy;
   }
 
+  const mode = section['mode'];
+  if (mode === 'pool' || mode === 'fallback') {
+    config.mode = mode;
+  }
+
+  if (Array.isArray(section['fallback'])) {
+    const fallback = (section['fallback'] as unknown[])
+      .map(parseEndpoint)
+      .filter((endpoint): endpoint is Endpoint => endpoint !== null);
+    if (fallback.length > 0) config.fallback = fallback;
+  }
+
   // Range clamping (max(1, ...), max(0, ...)) stays the runtime's job
   // (health.ts); the schema only enforces types.
   if (isFiniteNumber(section['cooldownMs'])) config.cooldownMs = section['cooldownMs'];
@@ -110,6 +130,16 @@ export function parseConfigDocument(doc: unknown): OrchestratorConfig | null {
   if (isFiniteNumber(section['maxRetries'])) config.maxRetries = section['maxRetries'];
   if (typeof section['debug'] === 'boolean') config.debug = section['debug'];
   if (typeof section['persistTelemetry'] === 'boolean') config.persistTelemetry = section['persistTelemetry'];
+
+  const ui = section['ui'];
+  if (isPlainObject(ui)) {
+    const uiConfig: OrchestratorUiConfig = {};
+    if (typeof ui['toasts'] === 'boolean') uiConfig.toasts = ui['toasts'];
+    if (typeof ui['panel'] === 'boolean') uiConfig.panel = ui['panel'];
+    // An empty object is kept: an explicit `ui: {}` means "recognized but
+    // all surfaces off", distinct from an unparsed/absent key.
+    config.ui = uiConfig;
+  }
 
   if (Array.isArray(section['endpoints'])) {
     const endpoints = (section['endpoints'] as unknown[])
@@ -142,6 +172,24 @@ export function extractEndpoints(config: OrchestratorConfig | null): Endpoint[] 
   return [];
 }
 
+/** The usable rescue chain: configured `fallback` entries minus parked ones. */
+export function extractFallbackChain(config: OrchestratorConfig | null): Endpoint[] {
+  if (config && Array.isArray(config.fallback) && config.fallback.length > 0) {
+    return config.fallback.filter((e): e is Endpoint => Boolean(e && e.provider && e.model && e.enabled !== false));
+  }
+  return [];
+}
+
+/**
+ * Effective handling mode: a requested `fallback` mode without any usable
+ * rescue entries degrades to `pool` — a rescue chain with no rescuers must
+ * not become a single point of failure. Computed on refresh, cached below.
+ */
+function resolveMode(config: OrchestratorConfig | null, fallbackChain: Endpoint[]): 'pool' | 'fallback' {
+  if (config?.mode === 'fallback' && fallbackChain.length > 0) return 'fallback';
+  return 'pool';
+}
+
 export function reloadConfig(): void {
   if (isCustomTestConfig) return;
   const parsed = parseConfigFile(activeFilePath);
@@ -159,6 +207,8 @@ export function reloadConfig(): void {
 
   cachedConfig = parsed;
   cachedEndpoints = extractEndpoints(cachedConfig);
+  cachedFallbackChain = extractFallbackChain(cachedConfig);
+  cachedMode = resolveMode(cachedConfig, cachedFallbackChain);
   hasLoadedFromDisk = true;
 }
 
@@ -179,6 +229,18 @@ export function getConfig(): OrchestratorConfig | null {
 export function getCachedEndpoints(): Endpoint[] {
   ensureLoaded();
   return cachedEndpoints;
+}
+
+/** Ordered rescue chain usable under the current config (empty when none). */
+export function getCachedFallbackChain(): Endpoint[] {
+  ensureLoaded();
+  return cachedFallbackChain;
+}
+
+/** Effective handling mode: `fallback` degrades to `pool` without rescuers. */
+export function getCachedMode(): 'pool' | 'fallback' {
+  ensureLoaded();
+  return cachedMode;
 }
 
 /** Coalesce watcher event bursts into a single reload per debounce window. */
@@ -244,6 +306,8 @@ export function setConfigForTest(config: OrchestratorConfig | null): void {
   isCustomTestConfig = true;
   cachedConfig = config;
   cachedEndpoints = extractEndpoints(config);
+  cachedFallbackChain = extractFallbackChain(config);
+  cachedMode = resolveMode(config, cachedFallbackChain);
   hasLoadedFromDisk = true;
 }
 
@@ -257,6 +321,8 @@ export function resetConfigForTest(filePath: string = DEFAULT_SETTINGS_PATH): vo
   activeFilePath = filePath;
   cachedConfig = null;
   cachedEndpoints = [];
+  cachedFallbackChain = [];
+  cachedMode = 'pool';
   hasLoadedFromDisk = false;
   isCustomTestConfig = false;
 }

@@ -60,6 +60,11 @@ export interface DiagnosticsSnapshot {
     retryIntervalMinMs: number;
     retryIntervalMaxMs: number;
   };
+  /** Opt-in UI gates, exactly as configured (both false when unset). */
+  ui: {
+    toasts: boolean;
+    panel: boolean;
+  };
   /** Number of endpoints in the effective pool (parked endpoints excluded). */
   effectivePoolSize: number;
   /** Full configured endpoint list, including parked entries. */
@@ -138,6 +143,12 @@ export function getDiagnosticsSnapshot(now: number = Date.now()): DiagnosticsSna
       maxFailures: config?.maxFailures ?? 3,
       retryIntervalMinMs: config?.intervalMinMs ?? 3000,
       retryIntervalMaxMs: config?.intervalMaxMs ?? 5000
+    },
+    // UI surfaces are opt-in; an absent ui block reads as all-off so the
+    // plugin stays invisible until the user asks for a face.
+    ui: {
+      toasts: config?.ui?.toasts === true,
+      panel: config?.ui?.panel === true
     },
     effectivePoolSize: effectivePool.length,
     endpoints
