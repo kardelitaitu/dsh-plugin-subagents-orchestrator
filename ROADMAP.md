@@ -48,9 +48,21 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 ## 🎨 Phase 4: GUI Settings Panel
 
+- [x] **Opt-in settings panel arm** (`ui.panel: true`): the plugin registers the
+  `subagents-orchestrator` namespace with DSH's settings service (schemastery
+  schema), so the Desktop settings UI can render and edit the scalar fields
+  through the standard describe/update protocol. Panel writes persist to the
+  same `settings.yaml` the plugin's debounced watcher hot-reloads — no client
+  code needed. List editing (`endpoints`/`fallback`) remains Tier C.
 - [ ] **Optional UI Card Component**:
   - Add optional settings panel in DSH Desktop settings to add, test, and toggle subagent endpoints interactively.
   - "Test Connection" button with live ping and token check.
+- [ ] **Failover toasts (blocked upstream)**: live push to the web client
+  requires either a `SessionEventMap` extension point or a new entry in
+  `dsh-api-remotes`' compiled `API_REMOTE_FORWARDED_EVENTS` allowlist — both
+  are closed to third-party plugins in DSH 0.1.1-rc.2. Re-evaluate on DSH
+  upgrades; until then the diagnostics snapshot + settings panel carry the
+  observability load.
 
 ---
 

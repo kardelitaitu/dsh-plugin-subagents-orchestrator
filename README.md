@@ -81,6 +81,7 @@ subagents-orchestrator:
 | `intervalMaxMs` | `number` | `5000` | Upper bound of the randomized wait before a retried subagent request (failover pacing) |
 | `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |
 | `persistTelemetry` | `boolean` | `false` | Opt-in: on plugin dispose, flush buffered telemetry events (day-bucketed JSONL, 7-day retention) and an endpoint-stats snapshot to `~/.dsh/telemetry/subagents-orchestrator` for offline diagnostics |
+| `ui` | `object` | `{}` | Opt-in UI surfaces, all off by default so the plugin stays invisible: `ui.panel: true` registers an editable `subagents-orchestrator` section in the DSH settings surface (requires a plugin reload after flipping), `ui.toasts` gates the future failover-toast client surface (see ROADMAP) |
 | `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight?, enabled? }` endpoints (`weight` feeds the `"weighted"` strategy; `enabled: false` parks an endpoint — it stays in the config but is excluded from routing, failover targets and telemetry) |
 
 ---

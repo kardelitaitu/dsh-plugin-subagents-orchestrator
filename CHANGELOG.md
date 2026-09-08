@@ -39,6 +39,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   telemetry counters; `formatDiagnostics()` renders a compact report.
   Strictly non-mutating — breaker health is derived without tripping the
   probation transition, and probing never touches the disk.
+- Opt-in settings panel arm (`ui.panel: true`): registers the
+  `subagents-orchestrator` namespace with DSH's settings service so the
+  Desktop settings UI can edit the scalar fields; panel writes persist to
+  the watched settings.yaml and hot-reload through the zero-I/O cache.
+  Config gates `ui: { toasts, panel }` added (all surfaces off by default).
 - Durable telemetry persistence (`persist.ts`, opt-in via
   `persistTelemetry`): on plugin dispose the event ring is flushed into
   day-bucketed JSONL (7-day retention) and an endpoint-stats snapshot is
