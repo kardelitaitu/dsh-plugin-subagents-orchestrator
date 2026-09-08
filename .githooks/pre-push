@@ -1,0 +1,48 @@
+#!/bin/sh
+# pre-push - local mirror of the CI gate that has turned main red twice.
+#
+# Why this exists: the probe-first TDD flow here commits tests before their
+# implementation lands (eaa7545 pushed tests/tdd21.test.ts against
+# getCachedMode()/getCachedFallbackChain(), which did not exist in that tree),
+# and a feature commit can also break the strict typecheck (69cc5ed shipped
+# src/settings.ts with two TS18046 errors). CI runs on every push to main, so
+# either case publishes a red badge until the next push happens to fix it.
+#
+# The hook runs the two blocking CI steps - tsc --noEmit and vitest run -
+# before anything leaves the machine. tsconfig.json excludes tests/, so the
+# typecheck alone would NOT have caught the tdd21 breakage; the suite does.
+#
+# Install once per clone:  npm run hooks:install   (any pnpm/npm install runs
+#                          it for you through the "prepare" script)
+# Bypass one push:         git push --no-verify    (or DSH_SKIP_PUSH_VERIFY=1)
+
+if [ "$DSH_SKIP_PUSH_VERIFY" = "1" ]; then
+  echo "pre-push: verification skipped (DSH_SKIP_PUSH_VERIFY=1)" >&2
+  exit 0
+fi
+
+# Drain git's ref list (local-ref local-oid remote-ref remote-oid per line).
+cat >/dev/null
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+if command -v pnpm >/dev/null 2>&1; then
+  runner=pnpm
+elif command -v npm >/dev/null 2>&1; then
+  runner=npm
+else
+  echo "pre-push: no pnpm/npm on PATH - run 'pnpm run verify' manually before pushing." >&2
+  exit 1
+fi
+
+echo "pre-push: running the CI gate (typecheck + vitest) ..." >&2
+if ! "$runner" run verify; then
+  echo "" >&2
+  echo "pre-push: BLOCKED - the CI gate fails locally, so this push would fail CI." >&2
+  echo "pre-push: fix it, or bypass deliberately with:  git push --no-verify" >&2
+  exit 1
+fi
+
+echo "pre-push: OK - typecheck clean, suite green." >&2
+exit 0

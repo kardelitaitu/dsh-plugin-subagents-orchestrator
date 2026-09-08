@@ -58,6 +58,10 @@
     "dev": "tsup --watch",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "verify": "tsc --noEmit && vitest run",
+    "ci:local": "pnpm run verify && pnpm run build && npm pack --dry-run",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "prepare": "git config core.hooksPath .githooks || true",
     "report": "node scripts/telemetry-report.mjs"
   },
   "dependencies": {

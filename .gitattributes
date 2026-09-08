@@ -1,0 +1,4 @@
+# Shell hooks must stay LF: a CRLF shebang line breaks the interpreter
+# (core.autocrlf=true on this developer box would otherwise rewrite them).
+.githooks/** text eol=lf
+*.sh text eol=lf
