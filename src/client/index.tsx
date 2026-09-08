@@ -302,37 +302,64 @@ export function bindSnapshotSelector(scope: any) {
   };
 }
 
-export function SubagentsOrchestratorSection({ inject }: { inject?: { scope: any; useScope: any } }) {
+function projectConfig(value: any): ClientConfig {
+  if (!value || typeof value !== 'object') return { ...DEFAULTS };
+  return {
+    enabled: typeof value.enabled === 'boolean' ? value.enabled : DEFAULTS.enabled,
+    strategy: value.strategy || DEFAULTS.strategy,
+    failover: typeof value.failover === 'boolean' ? value.failover : DEFAULTS.failover,
+    mode: value.mode || DEFAULTS.mode,
+    endpoints: Array.isArray(value.endpoints) ? value.endpoints : [],
+    fallback: Array.isArray(value.fallback) ? value.fallback : [],
+    cooldownMs: typeof value.cooldownMs === 'number' ? value.cooldownMs : DEFAULTS.cooldownMs,
+    maxFailures: typeof value.maxFailures === 'number' ? value.maxFailures : DEFAULTS.maxFailures,
+    intervalMinMs: typeof value.intervalMinMs === 'number' ? value.intervalMinMs : DEFAULTS.intervalMinMs,
+    intervalMaxMs: typeof value.intervalMaxMs === 'number' ? value.intervalMaxMs : DEFAULTS.intervalMaxMs,
+    debug: typeof value.debug === 'boolean' ? value.debug : DEFAULTS.debug,
+    persistTelemetry: typeof value.persistTelemetry === 'boolean' ? value.persistTelemetry : DEFAULTS.persistTelemetry
+  };
+}
+
+export function SubagentsOrchestratorSection(props: any) {
   ensureCss();
 
-  const scope = inject?.scope;
-  const useScope = inject?.useScope;
+  const scope = props?.scope ?? props?.inject?.scope;
+  const useScope = props?.useScope ?? props?.inject?.useScope;
   const snap = useScope ? useScope((s: any) => s) : scope?.getSnapshot?.();
 
   const ready = Boolean(snap && snap.status === 'ready');
-  const stored: ClientConfig = (ready && snap.value) || {};
-  const writable = Boolean(ready && snap.writable);
+  const current = projectConfig(ready ? snap.value : (snap?.value ?? null));
+  const writable = snap ? snap.writable !== false : true;
 
-  const [draft, setDraft] = useState<ClientConfig>({ ...DEFAULTS, ...stored });
+  const currentKey = JSON.stringify(current);
+  const [prevKey, setPrevKey] = useState(currentKey);
+  const [draft, setDraft] = useState<ClientConfig>(current);
+
+  if (currentKey !== prevKey) {
+    setPrevKey(currentKey);
+    if (JSON.stringify(draft) === prevKey) {
+      setDraft(current);
+    }
+  }
+
   const [saveState, setSaveState] = useState<'saving' | 'ok' | 'fail' | null>(null);
   const [newProv, setNewProv] = useState('');
   const [newModel, setNewModel] = useState('');
   const [newWeight, setNewWeight] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // Synchronize incoming updates when not dirty
+  // Sync draft when snap first arrives
   useEffect(() => {
-    if (ready && snap.value) {
+    if (snap?.value) {
       setDraft((prev) => ({
-        ...DEFAULTS,
-        ...snap.value,
-        // preserve local draft additions if any
+        ...prev,
+        ...projectConfig(snap.value),
         endpoints: snap.value.endpoints ?? prev.endpoints ?? []
       }));
     }
   }, [snap?.revision, ready]);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify({ ...DEFAULTS, ...stored });
+  const dirty = JSON.stringify(draft) !== currentKey;
 
   const update = (field: keyof ClientConfig, value: any) => {
     setDraft((d) => ({ ...d, [field]: value }));
@@ -377,7 +404,7 @@ export function SubagentsOrchestratorSection({ inject }: { inject?: { scope: any
     setSaveState('saving');
     try {
       for (const [key, value] of Object.entries(draft)) {
-        if (JSON.stringify(stored[key as keyof ClientConfig]) !== JSON.stringify(value)) {
+        if (JSON.stringify(current[key as keyof ClientConfig]) !== JSON.stringify(value)) {
           await scope.set(key, value);
         }
       }
@@ -386,10 +413,10 @@ export function SubagentsOrchestratorSection({ inject }: { inject?: { scope: any
     } catch {
       setSaveState('fail');
     }
-  }, [draft, stored, scope]);
+  }, [draft, current, scope]);
 
   const revert = () => {
-    setDraft({ ...DEFAULTS, ...stored });
+    setDraft(current);
     setSaveState(null);
   };
 
