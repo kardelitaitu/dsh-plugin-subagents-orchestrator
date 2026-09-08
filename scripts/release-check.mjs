@@ -564,7 +564,9 @@ function stageBuildParity() {
   const before = captureGitStatus();
   const build = runNpm(['run', 'build'], { cwd: ROOT });
   if (!build.ok) return { issues: ['build: the build script failed'], notes: [] };
-  const touchedLib = captureGitStatus().filter((line) => line.includes('lib/'));
+  // *.map files are excluded: a sourcemap embeds sourcesContent verbatim, so a
+  // stray CR in one source line makes a map byte-compare platform-dependent.
+  const touchedLib = captureGitStatus().filter((line) => line.includes('lib/') && !line.endsWith('.map'));
   if (touchedLib.length === 0) return { issues: [], notes: ['committed lib/ matches a fresh build'] };
   return { issues: ['build: committed lib/ is stale - rebuild and commit before publishing (git-hosted installs ship lib/)'], notes: [] };
 }

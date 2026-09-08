@@ -41,14 +41,18 @@ jobs:
         run: npm pack --dry-run
 
       # lib/ is committed so git-hosted installs (dsh plugin add github:...)
-      # ship a build; catch a lib/ that no longer matches src/.
+      # ship a build; catch a lib/ that no longer matches src/. The *.map files
+      # are excluded on purpose: a sourcemap embeds sourcesContent verbatim, so
+      # one stray carriage return from an editor makes the byte-compare
+      # platform-dependent (a Linux runner rebuilds client.js.map differently).
+      # The shipped payload - lib/*.js and lib/*.d.ts - is what must match.
       - name: Committed lib/ matches the build
         run: |
-          if git diff --quiet -- lib; then
-            echo "lib/ is current"
+          if git diff --quiet -- lib ':(exclude)lib/*.map'; then
+            echo "lib/ payload is current"
           else
             echo "::error::lib/ is stale - rebuild and commit it"
-            git --no-pager diff --stat -- lib
+            git --no-pager diff --stat -- lib ':(exclude)lib/*.map'
             exit 1
           fi
 

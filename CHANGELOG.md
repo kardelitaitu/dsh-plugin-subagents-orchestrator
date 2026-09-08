@@ -61,6 +61,12 @@ cycle, so this is also the first release the packaging gate was built for.
   after a crash; missing or corrupt stores degrade to a location report.
 - CI runs `npm pack --dry-run` after build, so packaging regressions
   (files-manifest omissions) fail the build instead of the publish.
+- CI and the release gate compare the committed `lib/` payload against a fresh
+  build. `*.map` files are excluded from that comparison: a sourcemap embeds
+  `sourcesContent` verbatim, so one stray carriage return from an editor made
+  the byte-compare platform-dependent (a Linux runner rebuilds the client map
+  differently). What must match is what a consumer loads - `lib/*.js` and
+  `lib/*.d.ts`.
 - Release preflight (`scripts/release-check.mjs`, `pnpm run release:check`):
   validates the publish metadata, packs a real tarball, installs it into a
   throwaway consumer project and imports every Node-resolvable subpath

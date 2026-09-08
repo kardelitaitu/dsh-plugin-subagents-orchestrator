@@ -351,7 +351,10 @@ describe('release notes and licensing (publish preflight, part 2)', () => {
       const ci = load('.github/workflows/ci.yml');
       const runs = ci.jobs.verify.steps.map((s: any) => s.run || '').join('\n');
       expect(runs).toMatch(/pnpm run release:check/);
-      expect(runs).toMatch(/git diff --quiet -- lib/);
+      // The lib/ parity guard must ignore *.map files, or a Linux runner fails
+      // on a byte-different sourcesContent that no consumer ever loads.
+      expect(runs).toMatch(/git diff --quiet -- lib ':\(exclude\)lib\/\*\.map'/);
+      expect(runs).not.toMatch(/git diff --quiet -- lib(?! ')/);
     });
 
     it('the release workflow gates on the preflight before publishing', () => {

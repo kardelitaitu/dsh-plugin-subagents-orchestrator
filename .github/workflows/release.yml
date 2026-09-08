@@ -81,13 +81,16 @@ jobs:
 
       # lib/ is committed so a git-hosted install (dsh plugin add github:...)
       # ships a build; a stale lib/ would publish code that does not match src/.
+      # *.map files are excluded: they embed sourcesContent verbatim, so an
+      # editor-introduced CR makes the byte-compare platform-dependent. The
+      # shipped payload (lib/*.js, lib/*.d.ts) is what must match.
       - name: Committed lib/ matches the build
         run: |
-          if git diff --quiet -- lib; then
-            echo "lib/ is current"
+          if git diff --quiet -- lib ':(exclude)lib/*.map'; then
+            echo "lib/ payload is current"
           else
             echo "::error::lib/ is stale - rebuild and commit it before tagging"
-            git --no-pager diff --stat -- lib
+            git --no-pager diff --stat -- lib ':(exclude)lib/*.map'
             exit 1
           fi
 
