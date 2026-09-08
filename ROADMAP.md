@@ -95,17 +95,33 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 - [x] Add unit and integration tests simulating subagent session execution.
 - [x] CI gate: strict typecheck + vitest + tsup build on Node 20/22, `npm pack --dry-run`
-      for the manifest, and a "committed `lib/` matches `src/`" check (git-hosted installs
-      ship `lib/` verbatim, so a stale build must never reach a tag).
+      for the manifest, a "committed `lib/` matches `src/`" check (git-hosted installs
+      ship `lib/` verbatim, so a stale build must never reach a tag), the publish
+      preflight, and pack -> store -> read-back jobs so the artifact handoff the
+      publish job relies on is covered by every push rather than by a release.
 - [x] Pre-push hook mirroring the blocking CI steps locally.
-- [x] Publish preflight (`scripts/release-check.mjs`, `pnpm run release:check`): publish
-      metadata, changelog-for-version, a real `npm pack`, install the tarball into a
-      throwaway consumer project and import every published subpath, then probe
-      the registry for the version being cut.
+- [x] Publish preflight (`scripts/release-check.mjs`, `pnpm run release:check`): twelve checks
+      over what a publish would ship - manifest metadata and lifecycle-script rules,
+      packaged docs, the Cordis bundle patch registering the published name, a real
+      `npm pack`, then installing that tarball twice (npm, and pnpm in its isolated
+      store - the layout a DSH profile uses and the strict one that catches an
+      undeclared dependency) and driving the artifact the way the host would:
+      `apply()` must inject and wrap `subagents`, register its `agent/*` handlers,
+      pass an unconfigured `start()` through and restore it on dispose. Plus the
+      license audit of the resolved closure, `repository.url` against the origin
+      remote, and a registry duplicate-version probe. `--require-clean` guards a
+      hand-run publish against a dirty tree; `--expect-tag` is the release guard.
 - [x] v1.2.0 cut: version bump + changelog for everything merged after the
       `v1.1.0` tag (nothing had reached npm before this cycle).
 - [x] Tag-triggered publish workflow with npm OIDC provenance
-      (`.github/workflows/release.yml`), plus a dry-run mode to rehearse a release.
+      (`.github/workflows/release.yml`), plus a dry-run mode to rehearse a release
+      (run twice against `main`; the gate is green end to end and stops before
+      `npm publish`).
+- [x] Open-source release surface: `SECURITY.md` with the plugin trust surface,
+      issue/PR templates, `.github/dependabot.yml` for npm and Actions, a
+      `docs-config-parity` test pinning the README options table and defaults to
+      `parseConfigDocument` and the exported constants, and `CONTRIBUTING` release
+      guidance for action bumps and host-level artifact verification.
 - [ ] First publish: push the `v1.2.0` tag so the workflow releases it - needs the
       maintainer's npm account (trusted publisher for this repo, or an
       `NPM_TOKEN` secret). The artifact itself is already gated and green.
