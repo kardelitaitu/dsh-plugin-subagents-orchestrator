@@ -13,6 +13,8 @@ import {
   probeSource,
   changelogSection,
   classifyLicense,
+  parseRepoSlug,
+  checkRepositoryRemote,
   auditLicenses,
   GIT_HOSTILE_SCRIPTS,
 } from '../scripts/release-check.mjs';
@@ -373,6 +375,69 @@ describe('release notes and licensing (publish preflight, part 2)', () => {
     it('declares the preflight as a package script', () => {
       expect(realPkg.scripts['release:check']).toContain('scripts/release-check.mjs');
       expect(realPkg.scripts['ci:local']).toContain('release-check.mjs');
+    });
+  });
+});
+
+describe('repository cross-check (publish preflight, part 3)', () => {
+  describe('parseRepoSlug', () => {
+    it('reduces every git URL form to owner/repo', () => {
+      expect(parseRepoSlug('git+https://github.com/acme/demo.git')).toBe('acme/demo');
+      expect(parseRepoSlug('https://github.com/acme/demo')).toBe('acme/demo');
+      expect(parseRepoSlug('https://github.com/acme/demo/')).toBe('acme/demo');
+      expect(parseRepoSlug('git@github.com:acme/demo.git')).toBe('acme/demo');
+      expect(parseRepoSlug('ssh://git@github.com/acme/demo')).toBe('acme/demo');
+      expect(parseRepoSlug('https://user:***@github.com/acme/demo.git')).toBe('acme/demo');
+      expect(parseRepoSlug('git+ssh://git@gitlab.example.com/group/sub/proj.git')).toBe('sub/proj');
+    });
+
+    it('returns null instead of guessing on non-URLs', () => {
+      expect(parseRepoSlug('')).toBeNull();
+      expect(parseRepoSlug(null)).toBeNull();
+      expect(parseRepoSlug('not a repo url')).toBeNull();
+      expect(parseRepoSlug('https://github.com/acme')).toBeNull();
+    });
+  });
+
+  describe('checkRepositoryRemote', () => {
+    const pkgWith = (url: string | undefined) => ({ repository: url ? { type: 'git', url } : undefined });
+
+    it('passes when the manifest and the origin remote agree', () => {
+      const res = checkRepositoryRemote(
+        pkgWith('git+https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator.git'),
+        'https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator.git'
+      );
+      expect(res.issues).toEqual([]);
+      expect(res.note).toMatch(/matches the origin remote/);
+    });
+
+    it('fails when they disagree - the documented github: install would be wrong', () => {
+      const res = checkRepositoryRemote(
+        pkgWith('git+https://github.com/someone/else.git'),
+        'https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator.git'
+      );
+      expect(res.issues.join('|')).toMatch(/points at someone\/else but this checkout pushes to kardelitaitu/);
+      expect(res.note).toBeNull();
+    });
+
+    it('only warns on an owner difference, so a fork pull-request stays green', () => {
+      const res = checkRepositoryRemote(
+        pkgWith('git+https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator.git'),
+        'https://github.com/contributor/dsh-plugin-subagents-orchestrator.git'
+      );
+      expect(res.issues).toEqual([]);
+      expect(res.warnings.join('|')).toMatch(/fork or mirror/);
+    });
+
+    it('stays quiet when there is no remote to compare against', () => {
+      const res = checkRepositoryRemote(pkgWith('https://github.com/a/b.git'), null);
+      expect(res.issues).toEqual([]);
+      expect(res.note).toMatch(/no origin remote/);
+    });
+
+    it('warns rather than inventing a comparison for a malformed url', () => {
+      const res = checkRepositoryRemote(pkgWith('see README'), 'https://github.com/a/b.git');
+      expect(res.warnings.join('|')).toMatch(/not a recognizable git URL/);
     });
   });
 });

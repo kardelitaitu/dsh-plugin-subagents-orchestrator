@@ -88,16 +88,21 @@ pnpm run release:check     # publish preflight
    so both CI and the release workflow fail when it no longer matches `src/`.
    Semantic versioning is a promise to consumers: new config keys and
    subpaths are a minor bump, anything that changes routing defaults is major.
-3. **Preflight** with `pnpm run release:check`. Stages: manifest metadata ->
-   docs -> real `npm pack` -> install the tarball into a throwaway consumer
-   project and import every published subpath -> registry duplicate-version
-   probe. Add `--build-parity` to prove the committed `lib/` matches a fresh build,
-   or `--skip-install` / `--offline` when there is no network.
+3. **Preflight** with `pnpm run release:check`. Stages: manifest metadata -> docs ->
+   real `npm pack` -> install the tarball into a throwaway consumer project and
+   import every published subpath (plus a license audit of the resolved
+   runtime closure) -> `repository.url`-vs-origin cross-check -> registry
+   duplicate-version probe. Add `--build-parity` to prove the committed `lib/` matches
+   a fresh build, or `--skip-install` / `--offline` when there is no network.
 4. **Tag and push**: `git tag -a vX.Y.Z -m "release X.Y.Z" && git push origin vX.Y.Z`.
    `.github/workflows/release.yml` re-runs the whole gate, packs the artifact and
-   publishes it with npm OIDC provenance, so no long-lived token sits in
-   repository secrets (add an `NPM_TOKEN` secret to use a token instead). Run it
-   via *Actions -> Release -> Run workflow* with `dry_run` on to rehearse.
+   publishes it with npm OIDC provenance, so no long-lived token has to sit in
+   repository secrets. One-time setup either way: npm must know this repo is
+   allowed to publish the name - configure a trusted publisher (a *pending*
+   publisher, since the package does not exist yet) in the npm web UI, or add
+   an `NPM_TOKEN` repository secret and the workflow uses that instead. Rehearse
+   first via *Actions -> Release -> Run workflow* with `dry_run` on: it runs every
+   step including the pack and the artifact upload and stops before publish.
 5. **Verify from the registry**: `npm view dsh-plugin-subagents-orchestrator version`,
    then install it into a profile with
    `dsh plugin --profile desktop add dsh-plugin-subagents-orchestrator`.

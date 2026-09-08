@@ -10,10 +10,10 @@ name: Release
 # duplicate-version check), and publishes the packed tarball.
 #
 # Authentication uses npm's OIDC trusted publishing / provenance (id-token:
-# write below), so no long-lived token has to live in repository secrets.
-# Add an NPM_TOKEN secret instead and the publish step picks it up
-# automatically. Either way the npm account (or this GitHub repo, for trusted
-# publishing) must be allowed to publish the package name.
+# write below), so no long-lived token has to live in repository secrets - npm
+# just needs a publisher configured for this repo (a pending publisher while
+# the package name does not exist yet). Add an NPM_TOKEN repository secret
+# instead and the publish step authenticates with that token.
 #
 # Rehearse without publishing: Actions -> Release -> Run workflow, dry_run on.
 
@@ -133,20 +133,28 @@ jobs:
           name: npm-tarball
           path: dist
 
+      # Deliberately no registry-url here: setup-node writes an
+      # //registry.npmjs.org/:_authToken entry into the userconfig even when
+      # NODE_AUTH_TOKEN is unset (a placeholder value), and that entry
+      # outranks the OIDC identity - so the token-free route would 401 on a
+      # step that looks configured. The public registry is npm's default
+      # anyway; auth is written explicitly below when a token exists.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
       - name: Authenticate
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -e
+          echo "registry: $(npm config get registry)"
           if [ -n "$NPM_TOKEN" ]; then
             echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> "$HOME/.npmrc"
             echo "npm: publishing with the NPM_TOKEN secret"
           else
-            echo "npm: no NPM_TOKEN secret - using OIDC trusted publishing"
+            echo "npm: no NPM_TOKEN secret - publishing through OIDC trusted publishing"
+            echo "npm:   (requires a publisher configured for this repo in the npm UI)"
           fi
 
       - name: Publish

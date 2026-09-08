@@ -347,6 +347,68 @@ function readInstalledLicenses(nodeModulesDir) {
 }
 
 /**
+ * Pull owner/repo out of any git URL form (https, git+https, ssh, scp-like,
+ * with or without .git). Returns null when the string is not a repo URL.
+ *
+ * @param {string} url
+ * @returns {string|null} 'owner/repo'
+ */
+export function parseRepoSlug(url) {
+  const value = String(url || '').trim().replace(/\/+$/, '');
+  if (!value) return null;
+  const withoutSuffix = value.replace(/\.git$/i, '');
+  const normalize = (rest) => {
+    const parts = String(rest).split('/').filter(Boolean);
+    // Keep the last two segments so GitLab groups also reduce to a slug.
+    return parts.length < 2 ? null : parts.slice(-2).join('/');
+  };
+  const scp = withoutSuffix.match(/^[^@/\s]+@[^:\s]+:(.+)$/);
+  if (scp) return normalize(scp[1]);
+  const scheme = withoutSuffix.match(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?[^/]+\/(.+)$/i);
+  if (scheme) return normalize(scheme[1]);
+  return normalize(withoutSuffix);
+}
+
+/**
+  * The README installs this plugin with 'dsh plugin add github:owner/repo', and
+  * npm renders repository.url on the package page. If the manifest and the
+  * remote this checkout pushes to disagree, the published package advertises a
+  * source the documented install route cannot resolve. A different repository
+  * *name* is a hard failure; a different owner only warns, because that is what
+  * a fork's pull-request job legitimately looks like.
+ * @param {any} pkg parsed package.json
+ * @param {string|null} remoteUrl output of 'git remote get-url origin'
+ * @returns {{ issues: string[], warnings: string[], note: string|null }}
+ */
+export function checkRepositoryRemote(pkg, remoteUrl) {
+  const declared = pkg && pkg.repository
+    ? (typeof pkg.repository === 'string' ? pkg.repository : pkg.repository.url)
+    : null;
+  const fromManifest = parseRepoSlug(declared);
+  const fromRemote = parseRepoSlug(remoteUrl);
+  if (!fromManifest) return { issues: [], warnings: ['url is not a recognizable git URL'], note: null };
+  if (!fromRemote) return { issues: [], warnings: [], note: 'no origin remote to compare against' };
+  if (fromManifest === fromRemote) {
+    return { issues: [], warnings: [], note: 'url matches the origin remote (' + fromRemote + ')' };
+  }
+  const [manifestOwner, manifestRepo] = fromManifest.split('/');
+  const [remoteOwner, remoteRepo] = fromRemote.split('/');
+  if (manifestRepo !== remoteRepo) {
+    return { issues: ['url points at ' + fromManifest + ' but this checkout pushes to ' + fromRemote], warnings: [], note: null };
+  }
+  // Same repository under a different owner: that is a fork or a mirror, which is
+  // what a pull-request job legitimately looks like. Warn, never block.
+  return {
+    issues: [],
+    warnings: [
+      'url is ' + manifestOwner + '/' + manifestRepo + ' but this checkout pushes to ' + remoteOwner + '/'
+        + remoteRepo + ' (fork or mirror - the published github: install route would point elsewhere)',
+    ],
+    note: null,
+  };
+}
+
+/**
  * Subpaths a plain Node consumer can actually `import`:
  * - a JS target (data files like the Cordis patch are covered by the
  *   tarball/install checks instead),
@@ -529,6 +591,16 @@ function stageInstall(pkg, tarball, workDir) {
   return { issues, warnings: licenses.warnings, notes };
 }
 
+function stageRepository(pkg) {
+  let remote = null;
+  try {
+    remote = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', cwd: ROOT }).trim() || null;
+  } catch {
+    remote = null;
+  }
+  return checkRepositoryRemote(pkg, remote);
+}
+
 function stageRegistry(pkg, offline) {
   if (offline) return { issues: [], notes: ['registry probe skipped (--offline)'] };
   const exact = runNpm(['view', pkg.name + '@' + pkg.version, 'version', '--json'], { cwd: ROOT });
@@ -676,7 +748,12 @@ export function main(argv = []) {
       emit('install', smoke.notes, 'note');
     }
 
-    const registry = stageRegistry(pkg, opts.offline);
+    const remote = stageRepository(pkg);
+  emit('repository', remote.issues, 'fail');
+  emit('repository', remote.warnings, 'warn');
+  emit('repository', remote.note ? [remote.note] : [], 'note');
+
+  const registry = stageRegistry(pkg, opts.offline);
     emit('registry', registry.issues, 'fail');
     emit('registry', registry.notes, 'note');
   } catch (err) {
