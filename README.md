@@ -108,9 +108,9 @@ The snapshot is strictly non-mutating: breaker health is derived from the stored
 **Offline diagnostics**: with `persistTelemetry: true`, the same data lands under `~/.dsh/telemetry/subagents-orchestrator` (day-bucketed JSONL events + endpoint snapshot, 7-day retention). A dependency-free reader prints it any time — even while DSH is running or after a crash:
 
 ```bash
-node scripts/telemetry-report.mjs          # human-readable summary
-node scripts/telemetry-report.mjs --json   # machine-readable for tooling
-node scripts/telemetry-report.mjs --events 50 --dir ~/.dsh/telemetry/subagents-orchestrator
+pnpm report                                # human-readable summary (alias: node scripts/telemetry-report.mjs)
+pnpm report --json                         # machine-readable for tooling
+pnpm report --events 50 --dir ~/.dsh/telemetry/subagents-orchestrator
 ```
 
 ## Project Structure
