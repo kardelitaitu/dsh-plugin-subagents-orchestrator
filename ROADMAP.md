@@ -122,9 +122,13 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
       `docs-config-parity` test pinning the README options table and defaults to
       `parseConfigDocument` and the exported constants, and `CONTRIBUTING` release
       guidance for action bumps and host-level artifact verification.
-- [ ] First publish: push the `v1.2.0` tag so the workflow releases it - needs the
-      maintainer's npm account (trusted publisher for this repo, or an
-      `NPM_TOKEN` secret). The artifact itself is already gated and green.
+- [ ] First publish: the `v1.2.0` tag exists on the remote and the release
+      workflow ran against it. The gate passed on the tag (typecheck, suite, build
+      parity, the full publish preflight, artifact upload); the publish step then
+      stopped at `ENEEDAUTH` - npm has no publisher configured for this repo
+      and there is no `NPM_TOKEN` secret, so nothing reached the registry (still
+      404) and no GitHub Release was created. Configure either one and re-run that
+      workflow run; no new tag push is needed.
 
 ## 🧭 Candidate: Pool / Fallback endpoint modes (v2)
 

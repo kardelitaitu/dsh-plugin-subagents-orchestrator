@@ -116,8 +116,12 @@ Rules that keep a release honest:
   by hand (the tag workflow is unavailable), run `pnpm run release:check --
   --require-clean` first: it fails when any path in the `files` allowlist
   differs from HEAD, which in a shared checkout means someone else’s work.
-- A tag is immutable. If a published tag's workflow run failed, fix forward with
-  the next patch version; do not move or re-point the tag.
+- A tag is immutable once it has produced a release. If the run failed *before*
+  publishing - `ENEEDAUTH` means npm has no publisher configured for the
+  repo and no `NPM_TOKEN` secret was set - fix the cause and re-run that same
+  workflow run (Actions -> the failed run -> Re-run failed jobs); nothing was
+  released, so the tag does not move and no new version number is needed. Once a
+  version is actually on the registry, fix forward with the next patch instead.
 - `npm deprecate` is the only rollback: a published version cannot be deleted
   inside the 72-hour window, so `npm unpublish` is not part of this process.
 
