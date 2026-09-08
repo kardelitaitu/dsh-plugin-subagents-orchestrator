@@ -167,7 +167,11 @@ jobs:
           set -e
           tarball=$(ls dist/*.tgz)
           echo "publishing $tarball"
-          npm publish "$tarball" --provenance --access public
+          # ./-prefix is load-bearing: without it npm's spec parser may read the
+          # path as a hosted-git specifier (an npm publish run 1 failed with
+          # `git ls-remote ssh://git@github.com/dist/<tarball>.git`) instead of
+          # the local tarball it is.
+          npm publish "./$tarball" --provenance --access public
 
       - name: Confirm the registry serves it
         run: |
