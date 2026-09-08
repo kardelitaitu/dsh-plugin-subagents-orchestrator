@@ -44,6 +44,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   Desktop settings UI can edit the scalar fields; panel writes persist to
   the watched settings.yaml and hot-reload through the zero-I/O cache.
   Config gates `ui: { toasts, panel }` added (all surfaces off by default).
+- Tier C list editing: the panel schema models `endpoints` and `fallback`
+  as `{ provider, model, weight?, enabled? }` entries (identity required,
+  YAML-only keys like `reasoningEffort` preserved through validation).
 - Durable telemetry persistence (`persist.ts`, opt-in via
   `persistTelemetry`): on plugin dispose the event ring is flushed into
   day-bucketed JSONL (7-day retention) and an endpoint-stats snapshot is

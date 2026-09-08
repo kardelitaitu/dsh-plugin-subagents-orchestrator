@@ -53,10 +53,15 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
   schema), so the Desktop settings UI can render and edit the scalar fields
   through the standard describe/update protocol. Panel writes persist to the
   same `settings.yaml` the plugin's debounced watcher hot-reloads — no client
-  code needed. List editing (`endpoints`/`fallback`) remains Tier C.
+  code needed.
+- [x] **Tier C list editing**: the panel schema models `endpoints`/`fallback`
+  entries (`{ provider, model, weight?, enabled? }`, identity required);
+  YAML-only keys survive validation untouched. Malformed stored entries
+  degrade the panel to the plain YAML path instead of breaking routing.
 - [ ] **Optional UI Card Component**:
   - Add optional settings panel in DSH Desktop settings to add, test, and toggle subagent endpoints interactively.
-  - "Test Connection" button with live ping and token check.
+  - "Test Connection" button with live ping and token check (blocked on a
+    client→host RPC channel for third-party remotes; see the toast note).
 - [ ] **Failover toasts (blocked upstream)**: live push to the web client
   requires either a `SessionEventMap` extension point or a new entry in
   `dsh-api-remotes`' compiled `API_REMOTE_FORWARDED_EVENTS` allowlist — both
