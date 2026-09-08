@@ -28,7 +28,14 @@
  *                  installed location, and the client bundle must keep its
  *                  Cordis module-loader wrapper. The resolved runtime closure
  *                  is license-audited on the way (one copyleft transitive dep
- *                  would change the terms of an MIT release). The same probe is
+ *                  would change the terms of an MIT release). The probe also
+ *                  installs the published artifact into a Cordis-shaped context:
+ *                  apply() must inject and wrap the host subagents service,
+ *                  register every agent/* event the plugin claims to handle,
+ *                  pass an unconfigured start() through to the host, and hand the
+ *                  original service back on dispose. An artifact that merely
+ *                  resolves but never wires up would pass everything else here.
+ *                  The same probe is
  *                  then run against a pnpm install, because pnpm's isolated
  *                  store - what a DSH profile uses - exposes a dependency that
  *                  package.json forgot to declare, which npm's hoisting hides.
@@ -561,6 +568,62 @@ export function probeSource(pkg) {
     "  assert.ok(mod && typeof mod === 'object', spec + ' resolved to nothing');",
     '}',
     "console.log('PROBE: all ' + SUBPATHS.length + ' Node-resolvable exports subpath(s) resolve');",
+    '',
+    '// Everything above proves the resolver is happy. This proves the plugin is',
+    "// alive: install the published artifact into a Cordis-shaped context, check it",
+    '// wired the host events it claims to handle, that an unconfigured install',
+    "// still passes a start() through to the host (never vetoes), and that the",
+    '// dispose path hands the original service back and settles the config watcher.',
+    "// The plugin resolves ~/.dsh/settings.yaml through os.homedir(), so point",
+    '// HOME at this throwaway project before the first import - the smoke test',
+    "// must not read (or be changed by) the maintainer's real settings file.",
+    'process.env.HOME = process.cwd();',
+    'process.env.USERPROFILE = process.cwd();',
+    '',
+    "const EVENTS = ['agent/request', 'agent/request-error', 'agent/disposed', 'agent/turn-stopping', 'agent/error'];",
+    'const listeners = new Map();',
+    'const cleanups = [];',
+    'const injected = [];',
+    'const ctx = {',
+    '  inject(deps, callback) {',
+    '    for (const dep of deps) injected.push(dep);',
+    '    callback(ctx);',
+    '  },',
+    '  on(event, handler) {',
+    '    if (!listeners.has(event)) listeners.set(event, []);',
+    '    listeners.get(event).push(handler);',
+    '    return () => {',
+    "      const list = listeners.get(event) || [];",
+    '      const at = list.indexOf(handler);',
+    '      if (at >= 0) list.splice(at, 1);',
+    '    };',
+    '  },',
+    "  effect(callback) { const cleanup = callback(); if (typeof cleanup === 'function') cleanups.push(cleanup); },",
+    '  subagents: {',
+    "    start: async (label, request) => ({ started: label, request }),",
+    '    startContinuable: async (spec) => ({ continued: true, spec }),',
+    '  },',
+    '};',
+    'const originalStart = ctx.subagents.start;',
+    '',
+    'host.apply(ctx);',
+    '',
+    "assert.ok(injected.includes('subagents'), 'apply() must inject the subagents service');",
+    'assert.notEqual(ctx.subagents.start, originalStart, "apply() must wrap the host start()");',
+    'for (const event of EVENTS) {',
+    "  assert.ok((listeners.get(event) || []).length > 0, 'apply() registered no listener for ' + event);",
+    '}',
+    '// A request the plugin has no opinion about must arrive at the host intact.',
+    "const direct = await ctx.subagents.start('probe', { prompt: 'hello' });",
+    "assert.equal(direct.started, 'probe', 'a start() through the wrapped service must reach the host');",
+    "assert.ok(direct.request && direct.request.prompt === 'hello', 'the request payload must survive wrapping');",
+    "const continued = await ctx.subagents.startContinuable({ label: 'probe' });",
+    "assert.equal(continued.continued, true, 'startContinuable() must reach the host');",
+    '// DSH teardown runs these cleanups; a leaked fs.watch would hang shutdown.',
+    'for (const cleanup of cleanups) await cleanup();',
+    'assert.equal(ctx.subagents.start, originalStart, "dispose must hand back the original service");',
+    "console.log('PROBE: apply() wires ' + EVENTS.length + ' host listeners, passes a start through, disposes clean');",
+    'process.exit(0);',
     '',
   ].join('\n');
 }

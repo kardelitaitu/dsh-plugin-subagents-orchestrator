@@ -530,3 +530,41 @@ describe('dirty-tree guard (publish preflight, part 5)', () => {
     expect(dirtyPackagedPaths([], PACKAGED)).toEqual({ dirty: [], clean: true });
   });
 });
+
+describe('consumer probe covers the real host contract', () => {
+  const probe = probeSource(realPkg);
+
+  it('asserts every host event that apply() actually registers', () => {
+    const source = fs.readFileSync(path.join(repoRoot, 'src', 'index.ts'), 'utf8');
+    const re = /ctx\.on\(\s*'([^']+)'/g;
+    const registered: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) {
+      if (!registered.includes(m[1])) registered.push(m[1]);
+    }
+    expect(registered.length).toBeGreaterThanOrEqual(5);
+    const listed = (probe.match(/const EVENTS = \[([^\]]*)\]/) || ['', ''])[1];
+    const inProbe = listed.split(',').map((s) => s.trim().replace(/'/g, '')).filter(Boolean).sort();
+    // A new listener in apply() must be covered by the published-artifact smoke
+    // test, and the probe must not assert events the plugin stopped handling.
+    expect(inProbe).toEqual([...registered].sort());
+  });
+
+  it('keeps the host-wiring assertions in the probe', () => {
+    // The mutation check that proves these are live cannot run in the suite (it
+    // needs a full install), so pin their presence: dropping one is how a
+    // packaging gate quietly becomes decorative.
+    expect(probe).toMatch(/host\.apply\(ctx\)/);
+    expect(probe).toMatch(/must inject the subagents service/);
+    expect(probe).toMatch(/must wrap the host start\(\)/);
+    expect(probe).toMatch(/no listener for /);
+    expect(probe).toMatch(/must reach the host/);
+    expect(probe).toMatch(/the request payload must survive wrapping/);
+    expect(probe).toMatch(/dispose must hand back the original service/);
+    // HOME is redirected so the smoke test never reads the maintainer config.
+    expect(probe).toMatch(/process\.env\.HOME = process\.cwd\(\)/);
+    expect(probe).toMatch(/process\.env\.USERPROFILE = process\.cwd\(\)/);
+    // And it must still terminate: apply() starts a config watcher.
+    expect(probe).toMatch(/process\.exit\(0\)/);
+  });
+});
