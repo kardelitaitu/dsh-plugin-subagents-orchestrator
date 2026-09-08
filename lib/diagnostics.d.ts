@@ -20,6 +20,18 @@ interface EndpointStats {
     latencyMaxMs: number;
     /** Most recent failure latency (ms), or null before the first sample. */
     lastLatencyMs: number | null;
+    /** Completed (successful) attempts attributed to this endpoint. */
+    successes: number;
+    /** Success-span samples: request build -> next same-agent boundary. */
+    successLatencySamples: number;
+    /** Sum of success-span samples (ms); divide by successLatencySamples for the mean. */
+    successLatencyTotalMs: number;
+    /** Longest observed success span (ms). */
+    successLatencyMaxMs: number;
+    /** Most recent success span (ms), or null before the first sample. */
+    lastSuccessLatencyMs: number | null;
+    /** Sum of measured token deltas attributed to this endpoint's closed spans. */
+    tokensTotal: number;
 }
 
 /**
@@ -47,7 +59,7 @@ interface EndpointDiagnostics {
     /** `false` when parked via `enabled: false` (in config, out of the pool). */
     inPool: boolean;
     breaker: BreakerDiagnostics;
-    telemetry: Pick<EndpointStats, 'requests' | 'failures' | 'failovers' | 'cooldownHints' | 'latencySamples' | 'latencyTotalMs' | 'latencyMaxMs' | 'lastLatencyMs'>;
+    telemetry: Pick<EndpointStats, 'requests' | 'failures' | 'failovers' | 'cooldownHints' | 'latencySamples' | 'latencyTotalMs' | 'latencyMaxMs' | 'lastLatencyMs' | 'successes' | 'successLatencySamples' | 'successLatencyTotalMs' | 'successLatencyMaxMs' | 'lastSuccessLatencyMs' | 'tokensTotal'>;
 }
 interface DiagnosticsSnapshot {
     generatedAt: number;
