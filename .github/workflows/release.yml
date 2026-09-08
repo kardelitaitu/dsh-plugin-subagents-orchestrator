@@ -104,7 +104,7 @@ jobs:
           npm pack --pack-destination dist
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-tarball
           path: dist/*.tgz

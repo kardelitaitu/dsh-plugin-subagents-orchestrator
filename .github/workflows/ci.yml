@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload build artifacts
         if: matrix.node == 22
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lib
           path: lib/
@@ -86,7 +86,7 @@ jobs:
           npm pack --pack-destination dist
           (cd dist && sha256sum ./*.tgz | tee checksum.sha256)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-tarball
           path: |
