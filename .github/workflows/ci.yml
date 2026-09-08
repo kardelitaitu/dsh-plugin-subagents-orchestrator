@@ -66,3 +66,62 @@ jobs:
           name: lib
           path: lib/
           retention-days: 7
+
+  # The release pipeline packs in one job and publishes from the tarball in
+  # another, so the artifact handoff is part of the publish path. release.yml
+  # runs only on tags, and the download half of it has never executed - a
+  # publish must not be the first time this pair is tried. These two jobs cost
+  # seconds (npm pack needs no node_modules) and fail loudly if an actions/*
+  # bump changes what comes back out of the store: a checksum mismatch, an
+  # artifact that is no longer decompressed, a renamed or dropped file.
+  pack-release-artifact:
+    name: Pack the release artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pack with npm pack
+        run: |
+          mkdir -p dist
+          npm pack --pack-destination dist
+          (cd dist && sha256sum ./*.tgz | tee checksum.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball
+          path: |
+            dist/*.tgz
+            dist/checksum.sha256
+          if-no-files-found: error
+
+  unpack-release-artifact:
+    name: Read the artifact back from the store
+    needs: pack-release-artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tarball
+          path: incoming
+
+      - name: Verify the transported tarball
+        # The tarball is located by searching rather than by a fixed path:
+        # upload-artifact's root-flattening rules have changed across majors, and
+        # a layout difference upstream should not read as a broken package. What
+        # is asserted is the thing that matters - the bytes survived, it is still
+        # a readable npm tarball, and the payload is inside it.
+        run: |
+          set -euo pipefail
+          cd incoming
+          test "$(find . -name '*.tgz' -type f | wc -l)" -eq 1
+          tarball=$(find . -name '*.tgz' -type f | head -1)
+          checksum=$(find "$(dirname "$tarball")" -name 'checksum.sha256' -type f | head -1)
+          ( cd "$(dirname "$tarball")" && sha256sum --check "$(basename "$checksum")" )
+          tar -xzf "$tarball"
+          test -f package/lib/index.js
+          test -f package/lib/client.js
+          test -f package/lib/diagnostics.js
+          test -f package/cordis.patch.yml
+          test ! -e package/src
+          test ! -e package/tests
+          node -e "const p = require('./package/package.json'); if (!/^[0-9]+.[0-9]+.[0-9]+$/.test(p.version)) { console.error('unexpected version ' + p.version); process.exit(1); } console.log('store returned ' + p.name + '@' + p.version + ' intact');"

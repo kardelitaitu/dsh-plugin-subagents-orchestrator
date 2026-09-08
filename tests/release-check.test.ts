@@ -374,6 +374,27 @@ describe('release notes and licensing (publish preflight, part 2)', () => {
       expect(rel.jobs.publish.permissions.contents).toBe('write');
     });
 
+    it('CI exercises the artifact handoff the publish job depends on', () => {
+      const ci = load('.github/workflows/ci.yml');
+      const pack = ci.jobs['pack-release-artifact'];
+      const unpack = ci.jobs['unpack-release-artifact'];
+      expect(pack, 'a job that packs and uploads must exist').toBeTruthy();
+      expect(unpack, 'a second job must read it back from the store').toBeTruthy();
+      // Different jobs, or it is not a transport test.
+      expect(unpack.needs).toBe('pack-release-artifact');
+      const up = pack.steps.find((s: any) => String(s.uses || '').includes('upload-artifact'));
+      const down = unpack.steps.find((s: any) => String(s.uses || '').includes('download-artifact'));
+      expect(down.with.name, 'the download must name what was uploaded').toBe(up.with.name);
+      expect(up.with['if-no-files-found'], 'an empty upload must fail, not ship nothing').toBe('error');
+      const runs = unpack.steps.map((s: any) => s.run || '').join('\n');
+      // A checksum catches a store that returns different bytes; the tar -xzf
+      // plus the payload probes catch one that stops decompressing the upload.
+      expect(runs).toMatch(/sha256sum --check/);
+      expect(runs).toMatch(/tar -xzf/);
+      expect(runs).toMatch(/package\/lib\/index\.js/);
+      expect(runs).toMatch(/package\/cordis\.patch\.yml/);
+    });
+
     it('declares the preflight as a package script', () => {
       expect(realPkg.scripts['release:check']).toContain('scripts/release-check.mjs');
       expect(realPkg.scripts['ci:local']).toContain('release-check.mjs');

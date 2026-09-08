@@ -128,6 +128,10 @@ jobs:
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
+      # Nothing in this workflow runs on a pull request, so the upload/download
+      # pair below is exercised on every push by ci.yml instead
+      # (pack-release-artifact -> unpack-release-artifact), including a checksum
+      # and a look inside the returned tarball.
       - uses: actions/download-artifact@v4
         with:
           name: npm-tarball
