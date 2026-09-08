@@ -16,6 +16,7 @@ import {
   parseRepoSlug,
   checkRepositoryRemote,
   validateBundlePatch,
+  dirtyPackagedPaths,
   auditLicenses,
   GIT_HOSTILE_SCRIPTS,
 } from '../scripts/release-check.mjs';
@@ -483,5 +484,41 @@ describe('Cordis bundle patch (publish preflight, part 4)', () => {
     const { issues, warnings } = validateBundlePatch(text, realPkg);
     expect(issues).toEqual([]);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe('dirty-tree guard (publish preflight, part 5)', () => {
+  const PACKAGED = ['lib', 'scripts/telemetry-report.mjs', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE'];
+
+  it('reads porcelain v1 lines by column, not by first space', () => {
+    expect(dirtyPackagedPaths([' M lib/index.js', '?? lib/client.js.map'], PACKAGED)).toEqual({
+      dirty: ['lib/index.js', 'lib/client.js.map'],
+      clean: false,
+    });
+  });
+
+  it('ignores everything the package does not ship', () => {
+    const status = [' M src/index.ts', '?? tests/notices.test.ts', ' M ROADMAP.md', ' M .github/workflows/ci.yml'];
+    expect(dirtyPackagedPaths(status, PACKAGED).clean).toBe(true);
+  });
+
+  it('honours a files entry that names one script, not the whole directory', () => {
+    const status = [' M scripts/telemetry-report.mjs', '?? scripts/release-check.mjs'];
+    const { dirty } = dirtyPackagedPaths(status, PACKAGED);
+    expect(dirty).toEqual(['scripts/telemetry-report.mjs']);
+  });
+
+  it('follows a rename to its new path and normalizes separators and quoting', () => {
+    expect(dirtyPackagedPaths(['R  README.old.md -> README.md'], PACKAGED).dirty).toEqual(['README.md']);
+    expect(dirtyPackagedPaths([' M "lib/a b.js"'], PACKAGED).dirty).toEqual(['lib/a b.js']);
+    expect(dirtyPackagedPaths([' M lib\\nested\\index.js'], PACKAGED).dirty).toEqual(['lib/nested/index.js']);
+  });
+
+  it('treats a deleted packaged file as dirty (it would vanish from the tarball)', () => {
+    expect(dirtyPackagedPaths([' D LICENSE'], PACKAGED).clean).toBe(false);
+  });
+
+  it('reports clean for an empty status', () => {
+    expect(dirtyPackagedPaths([], PACKAGED)).toEqual({ dirty: [], clean: true });
   });
 });

@@ -110,7 +110,10 @@ pnpm run release:check     # publish preflight
 Rules that keep a release honest:
 
 - Never publish from a working tree - the workflow publishes what it packs from
-  the tag, so uncommitted work is simply not in the release.
+  the tag, so uncommitted work is simply not in the release. If you must publish
+  by hand (the tag workflow is unavailable), run `pnpm run release:check --
+  --require-clean` first: it fails when any path in the `files` allowlist
+  differs from HEAD, which in a shared checkout means someone else’s work.
 - A tag is immutable. If a published tag's workflow run failed, fix forward with
   the next patch version; do not move or re-point the tag.
 - `npm deprecate` is the only rollback: a published version cannot be deleted

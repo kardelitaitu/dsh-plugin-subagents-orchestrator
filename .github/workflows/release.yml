@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: Publish preflight (pack, install smoke, registry)
-        run: pnpm run release:check
+        run: pnpm run release:check -- --require-clean
 
       - name: Pack the artifact to publish
         run: |

@@ -17,9 +17,12 @@
  *   2. docs      - LICENSE / README / CHANGELOG ship, CHANGELOG carries a section
  *                  for the exact version being published, and the DSH bundle
  *                  patch registers the name that is about to be published.
- *   3. pack      - real 'npm pack' into a temp dir, then the tarball file list
+ *   3. tree      - nothing the package ships differs from HEAD. A warning here
+ *                  is normal in this multi-session clone; --require-clean turns
+ *                  it into a failure for anyone publishing by hand.
+ *   4. pack      - real 'npm pack' into a temp dir, then the tarball file list
  *                  is checked (no src/, tests/, .github/ leakage).
- *   4. install   - 'npm install <tarball>' into a throwaway project and import
+ *   5. install   - 'npm install <tarball>' into a throwaway project and import
  *                  every Node-resolvable subpath: the host-plane entries must
  *                  load and answer, the offline report script must run from its
  *                  installed location, and the client bundle must keep its
@@ -30,7 +33,7 @@
  *                  store - what a DSH profile uses - exposes a dependency that
  *                  package.json forgot to declare, which npm's hoisting hides.
  *                  It is skipped with a note when pnpm is not on PATH.
- *   5. registry  - the version must still be free on registry.npmjs.org
+ *   6. registry  - the version must still be free on registry.npmjs.org
  *                  (and must be newer than what is already published).
  *
  * It also doubles as the release-notes source for the publish workflow:
@@ -313,6 +316,37 @@ export function auditLicenses(packages, selfName) {
     }
   }
   return { issues, warnings, permissive, total: packages.filter((p) => p && p.name && p.name !== selfName).length };
+}
+
+/**
+ * Which of the paths a release ships are not in the committed state.
+ *
+ * The publish workflow packs from the tag, so this never bites there. It exists
+ * for the manual route: a maintainer who runs npm publish in a shared checkout
+ * would otherwise ship another session's half-finished src/ and lib/ rebuild as
+ * an official release, with a version number nobody reviewed.
+ *
+ * @param {string[]} statusLines lines of 'git status --porcelain'
+ * @param {string[]} packaged top-level entries of the package "files" allowlist
+ * @returns {{ dirty: string[], clean: boolean }}
+ */
+export function dirtyPackagedPaths(statusLines, packaged) {
+  const dirty = [];
+  for (const line of statusLines) {
+    // Porcelain v1 is 'XY <path>' (renames as 'old -> new'); the path always
+    // starts at column 3, and only the second status char matters for us.
+    let path = String(line).slice(3).trim();
+    const arrow = path.indexOf(' -> ');
+    if (arrow >= 0) path = path.slice(arrow + 4);
+    path = path.replace(/^"|"$/g, '').replace(/\\/g, '/');
+    if (!path) continue;
+    const covered = (packaged || []).some((entry) => {
+      const e = String(entry).replace(/^\.\//, '');
+      return path === e || path.startsWith(e + '/') || (e.endsWith('/') && path.startsWith(e));
+    });
+    if (covered && !dirty.includes(path)) dirty.push(path);
+  }
+  return { dirty, clean: dirty.length === 0 };
 }
 
 /** Read { name, license } for every package directory under node_modules. */
@@ -757,6 +791,7 @@ const USAGE = [
   '  --offline          skip the registry duplicate-version probe',
   '  --json             machine-readable result for tooling',
   '  --build-parity     rebuild and fail if the committed lib/ went stale',
+  '  --require-clean    fail if any packaged file differs from HEAD (manual publish)',
   '  --keep             leave the temp tarball/consumer tree behind',
   '  --print-changelog [version]',
   '                     print the CHANGELOG section for a version (release notes)',
@@ -773,6 +808,7 @@ export function main(argv = []) {
     json: argv.includes('--json'),
     keep: argv.includes('--keep'),
     buildParity: argv.includes('--build-parity'),
+    requireClean: argv.includes('--require-clean'),
   };
 
   const failures = [];
@@ -817,6 +853,19 @@ export function main(argv = []) {
 
   // The DSH bundle patch is the plugin-specific half of packaging: an id that
   // does not match the package name installs cleanly and then loads nothing.
+  // Packing from a dirty shared checkout would ship another session's
+  // half-finished work under an official version number. Warning by default (a
+  // multi-session clone is normally dirty), hard failure with --require-clean:
+  // that is the flag to use before a manual npm publish.
+  const cleanliness = dirtyPackagedPaths(captureGitStatus(), pkg.files || []);
+  if (!cleanliness.clean) {
+    const message = cleanliness.dirty.length + ' packaged file(s) differ from HEAD: ' + cleanliness.dirty.slice(0, 6).join(', ') + (cleanliness.dirty.length > 6 ? ', ...' : '');
+    if (opts.requireClean) emit('tree', [message + ' - commit or stash before publishing'], 'fail');
+    else emit('tree', [message + ' - the workflow packs from the tag, a manual npm publish must not'], 'warn');
+  } else {
+    emit('tree', ['working tree matches HEAD for everything the package ships'], 'note');
+  }
+
   const patchPath = pkg.dsh && pkg.dsh.bundle && String(pkg.dsh.bundle.patch || '').replace(/^\.\//, '');
   if (patchPath) {
     const patchCheck = validateBundlePatch(safeRead(path.join(ROOT, patchPath)) || '', pkg);
