@@ -15,12 +15,24 @@ export interface EndpointHealthStatus {
   consecutiveFailures: number;
   trippedUntil: number | null;
   lastFailureAt: number | null;
+  /**
+   * Timestamps of recent trips (v2 flapping guard). Pruned against
+   * FLAP_WINDOW_MS on every trip; an endpoint exceeding
+   * FLAP_TRIP_THRESHOLD within the window draws the extended penalty.
+   */
+  recentTrips?: number[];
 }
 
 /** Consecutive failures tolerated before an endpoint is tripped. */
 export const DEFAULT_MAX_FAILURES = 3;
 /** How long a tripped endpoint stays out of rotation (ms). */
 export const DEFAULT_COOLDOWN_MS = 60_000;
+/** Flapping guard: trips within FLAP_WINDOW_MS that trigger the penalty. */
+export const FLAP_TRIP_THRESHOLD = 3;
+/** Flapping guard: how far back trips are counted (ms). */
+export const FLAP_WINDOW_MS = 10 * 60_000;
+/** Flapping guard: penalty cooldown multiplier once flapping is detected. */
+export const FLAP_COOLDOWN_MULTIPLIER = 3;
 
 /**
  * Per-endpoint circuit breaker.
@@ -111,7 +123,15 @@ export class CircuitBreaker {
     }
 
     if (status.consecutiveFailures >= threshold) {
-      status.trippedUntil = now + cooldown;
+      // Flapping guard (v2): prune the trip history, record this trip, and
+      // when the endpoint trips too often within the window, apply the
+      // extended penalty — a rapidly cycling endpoint needs a longer rest
+      // than a clean single cooldown, or it hogs the probation slots.
+      const trips = (status.recentTrips ?? []).filter((t) => now - t < FLAP_WINDOW_MS);
+      trips.push(now);
+      status.recentTrips = trips;
+      const multiplier = trips.length >= FLAP_TRIP_THRESHOLD ? FLAP_COOLDOWN_MULTIPLIER : 1;
+      status.trippedUntil = now + cooldown * multiplier;
       return true;
     }
     return false;
@@ -124,6 +144,7 @@ export class CircuitBreaker {
     if (status) {
       status.consecutiveFailures = 0;
       status.trippedUntil = null;
+      status.recentTrips = []; // a clean probationary success ends any flapping episode
     }
   }
 
