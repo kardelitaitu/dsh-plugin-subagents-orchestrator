@@ -5,6 +5,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_PERSIST_DIR } from '../src/persist.js';
 
 const exec = promisify(execFile);
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'telemetry-report.mjs');
@@ -91,5 +92,22 @@ describe('scripts/telemetry-report.mjs (offline diagnostics)', () => {
     expect(parsed.snapshot.at).toBe(123);
     expect(parsed.snapshot.endpoints[0].key).toBe('p1::m1');
     expect(Array.isArray(parsed.recentEvents)).toBe(true);
+  });
+
+  it('parity: the script default dir matches persist.ts DEFAULT_PERSIST_DIR', async () => {
+    // The script duplicates the storage-root constant (it must stay
+    // dependency-free), so a divergence here would make the reader look at a
+    // different store than the plugin writes. Read the script source and
+    // check the mirrored path segments against the real constant.
+    const source = fs.readFileSync(scriptPath, 'utf8');
+    const join = source.match(/path\.join\(os\.homedir\(\)([\s\S]*?)\);/);
+    expect(join).not.toBeNull();
+    const segments = join![1].match(/'([^']+)'/g)!.map((s) => s.slice(1, -1));
+    const scriptDefault = path.join(os.homedir(), ...segments);
+    expect(scriptDefault).toBe(DEFAULT_PERSIST_DIR);
+    // The --dir override exists precisely because the default must keep
+    // working; sanity-check the script still honors it.
+    const { stdout } = await runScript(['--dir', dir]);
+    expect(stdout).toContain(dir);
   });
 });
