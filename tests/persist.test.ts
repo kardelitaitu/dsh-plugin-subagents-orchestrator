@@ -163,17 +163,17 @@ describe('Telemetry persistence', () => {
         const result = flushTelemetryToDisk(NOW);
         expect(result.eventsWritten).toBe(0);
         expect(result.snapshotWritten).toBe(false);
-        // Nothing was lost: the drained events can still be re-read...
         expect(readPersistedEvents(10)).toEqual([]);
-        // ...but drainRecentEvents already consumed the buffer, so the next
-        // flush from a healthy dir reports no NEW events. Documented
-        // trade-off: flush consumes the ring buffer by design (exactly-once
-        // delivery to disk), never re-flushing stale duplicates.
-        expect(flushTelemetryToDisk(NOW + 1).eventsWritten).toBe(0);
       } finally {
         fs.rmSync(blocker, { force: true });
         setPersistDirForTest(dir);
       }
+      // Lossless contract: the append failed BEFORE the buffer was consumed,
+      // so the events are still buffered and a retry from a healthy dir
+      // delivers them. No diagnostics are lost to a transient disk error.
+      const retried = flushTelemetryToDisk(NOW + 1);
+      expect(retried.eventsWritten).toBe(1);
+      expect(readPersistedEvents(10)[0]).toMatchObject({ agentId: 'agent-f2' });
     });
   });
 });

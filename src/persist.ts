@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { drainRecentEvents, getEndpointStats } from './telemetry.js';
+import { drainRecentEvents, getEndpointStats, getRecentEvents } from './telemetry.js';
 import type { TelemetryEvent, EndpointStats } from './telemetry.js';
 
 /**
@@ -164,8 +164,14 @@ export interface FlushResult {
  * plane down, so failures surface as falsey counters in the result.
  */
 export function flushTelemetryToDisk(now: number = Date.now()): FlushResult {
-  const drained: TelemetryEvent[] = drainRecentEvents();
-  const eventsWritten = drained.length > 0 ? appendEvents(drained, now) : 0;
+  // Peek first, append, and only consume the buffer once the append
+  // actually succeeded: a drain-first order would lose buffered
+  // diagnostics if the append fails (e.g. the disk fills mid-write).
+  const pending: TelemetryEvent[] = getRecentEvents();
+  const eventsWritten = pending.length > 0 ? appendEvents(pending, now) : 0;
+  if (pending.length > 0 && eventsWritten === pending.length) {
+    drainRecentEvents();
+  }
   const snapshotWritten = writeEndpointStatsSnapshot(getEndpointStats(), now);
   const bucketsPruned = pruneOldBuckets(now);
   return { eventsWritten, snapshotWritten, bucketsPruned };
