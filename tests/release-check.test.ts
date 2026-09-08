@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { load as loadYaml } from 'js-yaml';
 import {
   collectExportTargets,
   compareSemver,
@@ -10,6 +11,9 @@ import {
   validatePackList,
   nodeResolvableSubpaths,
   probeSource,
+  changelogSection,
+  classifyLicense,
+  auditLicenses,
   GIT_HOSTILE_SCRIPTS,
 } from '../scripts/release-check.mjs';
 
@@ -235,6 +239,137 @@ describe('scripts/release-check.mjs (publish preflight)', () => {
       for (const { target } of targets) {
         expect(fs.existsSync(path.join(repoRoot, target)), target).toBe(true);
       }
+    });
+  });
+});
+
+describe('release notes and licensing (publish preflight, part 2)', () => {
+  describe('changelogSection', () => {
+    it('returns one version body without touching the next section', () => {
+      const md = [
+        '# Changelog',
+        '',
+        '## [2.0.0] - 2026-10-01',
+        '',
+        '### Added',
+        '',
+        '- newer thing',
+        '',
+        '## [1.2.0] - 2026-09-08',
+        '',
+        '### Added',
+        '',
+        '- the thing that shipped',
+        '',
+        '## [1.1.0] - 2026-09-08',
+        '',
+        '- older thing',
+      ].join('\n');
+      expect(changelogSection(md, '1.2.0')).toBe('### Added\n\n- the thing that shipped');
+    });
+
+    it('reads the real changelog section for the version being published', () => {
+      const section = changelogSection(realChangelog, realPkg.version);
+      expect(section.length).toBeGreaterThan(0);
+      expect(section).toMatch(/### Added/);
+      expect(section).not.toMatch(/## \[1\.1\.0\]/);
+      // The preflight gate must be documented in its own release notes.
+      expect(section).toMatch(/release-check\.mjs/);
+    });
+
+    it('returns an empty string for an undocumented version', () => {
+      expect(changelogSection(realChangelog, '9.9.9')).toBe('');
+      expect(changelogSection('', '1.2.0')).toBe('');
+      expect(changelogSection(realChangelog, '')).toBe('');
+    });
+  });
+
+  describe('classifyLicense', () => {
+    it('accepts the permissive SPDX ids this stack actually uses', () => {
+      for (const id of ['MIT', 'ISC', 'Apache-2.0', 'BSD-3-Clause', 'BSD-2-Clause', '0BSD', 'CC0-1.0', 'Unlicense', 'MIT AND ISC', '(MIT OR Apache-2.0)']) {
+        expect(classifyLicense(id), id).toBe('permissive');
+      }
+    });
+
+    it('flags copyleft before it can change the terms of an MIT release', () => {
+      for (const id of ['GPL-3.0-only', 'AGPL-3.0', 'LGPL-2.1-or-later', 'MPL-2.0', 'EUPL-1.2', 'GPL-3.0 WITH Classpath-exception-2.0']) {
+        expect(classifyLicense(id), id).toBe('copyleft');
+      }
+      expect(classifyLicense('MIT OR GPL-3.0-or-later')).toBe('copyleft');
+    });
+
+    it('reports anything unrecognized instead of guessing', () => {
+      expect(classifyLicense(undefined)).toBe('unknown');
+      expect(classifyLicense('')).toBe('unknown');
+      expect(classifyLicense('SEE LICENSE IN LICENSE.txt')).toBe('unknown');
+      expect(classifyLicense('CC-BY-NC-4.0')).toBe('unknown');
+    });
+  });
+
+  describe('auditLicenses', () => {
+    it('audits the resolved runtime closure and ignores the package itself', () => {
+      const { issues, warnings, permissive, total } = auditLicenses(
+        [
+          { name: 'demo-plugin', license: 'MIT' },
+          { name: 'js-yaml', license: 'MIT' },
+          { name: 'schemastery', license: 'MIT' },
+        ],
+        'demo-plugin'
+      );
+      expect(issues).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(permissive).toBe(2);
+      expect(total).toBe(2);
+    });
+
+    it('fails the release on a copyleft dependency and warns on a missing license', () => {
+      const { issues, warnings } = auditLicenses(
+        [
+          { name: 'helper', license: 'GPL-3.0-or-later' },
+          { name: 'mystery', license: '' },
+          { name: 'fine', license: 'ISC' },
+        ],
+        'demo-plugin'
+      );
+      expect(issues.join('|')).toMatch(/helper ships as GPL-3\.0-or-later/);
+      expect(warnings.join('|')).toMatch(/mystery has no recognizable license/);
+    });
+
+    it('tolerates malformed entries', () => {
+      const { issues, warnings } = auditLicenses([null, { name: '' }, {}], 'demo-plugin');
+      expect(issues).toEqual([]);
+      expect(warnings).toEqual([]);
+    });
+  });
+
+  // A check nobody runs is not a gate: pin the wiring between the script and
+  // the pipelines that are supposed to execute it.
+  describe('pipeline wiring', () => {
+    const load = (file: string) => loadYaml(fs.readFileSync(path.join(repoRoot, file), 'utf8')) as any;
+
+    it('CI runs the publish preflight after the build', () => {
+      const ci = load('.github/workflows/ci.yml');
+      const runs = ci.jobs.verify.steps.map((s: any) => s.run || '').join('\n');
+      expect(runs).toMatch(/pnpm run release:check/);
+      expect(runs).toMatch(/git diff --quiet -- lib/);
+    });
+
+    it('the release workflow gates on the preflight before publishing', () => {
+      const rel = load('.github/workflows/release.yml');
+      expect(String(rel.on.push.tags.join(' '))).toMatch(/v\[0-9\]/);
+      const gateSteps = rel.jobs.gate.steps.map((s: any) => s.run || '').join('\n');
+      const publishSteps = rel.jobs.publish.steps.map((s: any) => s.run || '').join('\n');
+      expect(gateSteps).toMatch(/pnpm run release:check/);
+      // The gate job must run before anything reaches the registry.
+      expect(rel.jobs.publish.needs).toBe('gate');
+      expect(publishSteps).toMatch(/npm publish "[^"]*" --provenance/);
+      expect(publishSteps).toMatch(/--print-changelog/);
+      expect(rel.jobs.publish.permissions.contents).toBe('write');
+    });
+
+    it('declares the preflight as a package script', () => {
+      expect(realPkg.scripts['release:check']).toContain('scripts/release-check.mjs');
+      expect(realPkg.scripts['ci:local']).toContain('release-check.mjs');
     });
   });
 });

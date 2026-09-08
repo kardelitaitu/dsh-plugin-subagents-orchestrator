@@ -112,8 +112,19 @@ jobs:
     name: Publish to npm
     needs: gate
     runs-on: ubuntu-latest
+    # GitHub Release notes need contents: write; the npm auth itself only
+    # ever reads the registry, so keep the elevated permission in this job.
+    permissions:
+      contents: write
+      id-token: write
     if: ${{ github.event.inputs.dry_run != 'true' }}
     steps:
+      # Needed for the changelog-driven release notes below (the tarball
+      # itself comes from the gate job's artifact).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
       - uses: actions/download-artifact@v4
         with:
           name: npm-tarball
@@ -147,3 +158,19 @@ jobs:
           set -e
           version=$(node -p "require('./package.json').version")
           npm view "dsh-plugin-subagents-orchestrator@$version" version dist.tarball
+
+      # Release notes come from CHANGELOG.md through the same preflight that
+      # gated the artifact - never from a hand-copied summary.
+      - name: Publish the GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          version=$(node -p "require('./package.json').version")
+          node scripts/release-check.mjs --print-changelog "$version" > release-notes.md
+          if gh release view "v$version" >/dev/null 2>&1; then
+            gh release edit "v$version" --title "v$version" --notes-file release-notes.md
+          else
+            gh release create "v$version" --title "v$version" --notes-file release-notes.md --verify-tag
+          fi

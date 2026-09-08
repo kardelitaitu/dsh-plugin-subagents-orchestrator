@@ -22,9 +22,14 @@
  *                  every Node-resolvable subpath: the host-plane entries must
  *                  load and answer, the offline report script must run from its
  *                  installed location, and the client bundle must keep its
- *                  Cordis module-loader wrapper.
+ *                  Cordis module-loader wrapper. The resolved runtime closure
+ *                  is license-audited on the way (one copyleft transitive dep
+ *                  would change the terms of an MIT release).
  *   5. registry  - the version must still be free on registry.npmjs.org
  *                  (and must be newer than what is already published).
+ *
+ * It also doubles as the release-notes source for the publish workflow:
+ * '--print-changelog <version>' prints that version's CHANGELOG section.
  *
  * Stages 1-3 are pure and unit-tested; 4-5 shell out to npm and are the CLI's
  * job. Exits non-zero on any FAIL so CI and the pre-publish checklist can gate
@@ -196,6 +201,28 @@ export function validateManifest(pkg, ctx = {}) {
 }
 
 /**
+ * Extract the release notes for one version: everything under its
+ * '## [x.y.z]' heading up to the next '##' heading. The publish workflow
+ * feeds this straight into the GitHub Release body, so the changelog stays
+ * the single source of truth for what a release claims to contain.
+ *
+ * @param {string} markdown full CHANGELOG.md text
+ * @param {string} version bare version (no leading 'v')
+ * @returns {string} the section body, or '' when there is no such section
+ */
+export function changelogSection(markdown, version) {
+  if (typeof markdown !== 'string' || !version) return '';
+  const lines = markdown.split(/\r?\n/);
+  const start = lines.findIndex((l) => l.startsWith('## [' + version + ']'));
+  if (start < 0) return '';
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i].startsWith('## ')) { end = i; break; }
+  }
+  return lines.slice(start + 1, end).join('\n').trim();
+}
+
+/**
  * Stage 3: validate the tarball file list produced by 'npm pack --json'.
  *
  * @param {string[]} packFiles paths inside the tarball, as reported by npm
@@ -227,6 +254,96 @@ export function validatePackList(packFiles, pkg) {
   if (maps > 0) warnings.push('tarball: ' + maps + ' sourcemap file(s) published (fine, but they carry the size)');
   if (!set.has('package.json')) warnings.push('tarball: package.json not listed (npm always adds it - odd npm version?)');
   return { issues, warnings };
+}
+
+/** Licenses that are safe to ship inside an MIT-licensed package. */
+export const PERMISSIVE_LICENSES = new Set([
+  'mit', 'isc', 'apache-2.0', 'bsd-2-clause', 'bsd-3-clause', 'bsd', '0bsd',
+  'cc0-1.0', 'cc-by-4.0', 'unlicense', 'the unlicense', 'blueoak-1.0.0', 'python-2.0', 'zlib',
+]);
+
+/** Copyleft licenses: they change what downstream users must do with the package. */
+export const COPYLEFT_LICENSE_RE = /^(g?lgpl|agpl|gpl|mpl|mozilla public|eupl|cpol)/i;
+
+/**
+ * Classify one SPDX-ish license string.
+ *
+ * @param {string} license the package.json license (or licenses[0].type) value
+ * @returns {'permissive' | 'copyleft' | 'unknown'}
+ */
+export function classifyLicense(license) {
+  const value = String(license || '').trim().toLowerCase();
+  if (!value) return 'unknown';
+  if (COPYLEFT_LICENSE_RE.test(value)) return 'copyleft';
+  if (PERMISSIVE_LICENSES.has(value)) return 'permissive';
+  // SPDX expressions: '(MIT OR Apache-2.0)', 'MIT AND ISC', ...
+  const atoms = value.split(/[()/,;]+|\bor\b|\band\b/).map((s) => s.trim()).filter(Boolean);
+  if (!atoms.length) return 'unknown';
+  if (atoms.some((a) => COPYLEFT_LICENSE_RE.test(a))) return 'copyleft';
+  return atoms.every((a) => PERMISSIVE_LICENSES.has(a)) ? 'permissive' : 'unknown';
+}
+
+/**
+ * Audit the licenses of everything that lands in a consumer's tree: the
+ * package's own runtime closure is what an npm install resolves, and one
+ * copyleft transitive dependency would silently change the terms of an
+ * MIT-licensed plugin release.
+ *
+ * @param {string[]} packages [{ name, license }] pairs
+ * @param {string} selfName the audited package, excluded from its own closure
+ * @returns {{ issues: string[], warnings: string[], permissive: number, total: number }}
+ */
+export function auditLicenses(packages, selfName) {
+  const issues = [];
+  const warnings = [];
+  let permissive = 0;
+  for (const entry of packages) {
+    if (!entry || !entry.name || entry.name === selfName) continue;
+    const kind = classifyLicense(entry.license);
+    if (kind === 'permissive') permissive++;
+    else if (kind === 'copyleft') {
+      issues.push('license: ' + entry.name + ' ships as ' + (entry.license || 'unlicensed') + ' - copyleft in the dependency closure needs an explicit review');
+    } else {
+      warnings.push('license: ' + entry.name + ' has no recognizable license field (' + (entry.license || 'missing') + ')');
+    }
+  }
+  return { issues, warnings, permissive, total: packages.filter((p) => p && p.name && p.name !== selfName).length };
+}
+
+/** Read { name, license } for every package directory under node_modules. */
+function readInstalledLicenses(nodeModulesDir) {
+  const out = [];
+  const readOne = (dir) => {
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      const license = typeof p.license === 'string' ? p.license
+        : Array.isArray(p.licenses) && p.licenses[0] && p.licenses[0].type ? p.licenses[0].type : '';
+      return { name: p.name, license };
+    } catch {
+      return null;
+    }
+  };
+  let entries = [];
+  try {
+    entries = fs.readdirSync(nodeModulesDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === '.bin') continue;
+    const base = path.join(nodeModulesDir, entry.name);
+    if (entry.name.startsWith('@')) {
+      for (const scoped of fs.readdirSync(base, { withFileTypes: true })) {
+        if (!scoped.isDirectory()) continue;
+        const info = readOne(path.join(base, scoped.name));
+        if (info && info.name) out.push(info);
+      }
+      continue;
+    }
+    const info = readOne(base);
+    if (info && info.name) out.push(info);
+  }
+  return out;
 }
 
 /**
@@ -392,6 +509,12 @@ function stageInstall(pkg, tarball, workDir) {
     if (trimmed.startsWith('PROBE:')) notes.push(trimmed.replace(/^PROBE:/, '').trim());
   }
 
+  // Runtime closure license audit: one copyleft transitive dependency would
+  // silently change the terms of an MIT release.
+  const licenses = auditLicenses(readInstalledLicenses(path.join(workDir, 'node_modules')), pkg.name);
+  issues.push(...licenses.issues);
+  notes.push('license audit: ' + licenses.permissive + '/' + licenses.total + ' installed dependencies are permissively licensed');
+
   // The offline diagnostics reader has to work from its installed location.
   const report = path.join(installed, 'scripts', 'telemetry-report.mjs');
   if (fs.existsSync(report)) {
@@ -403,7 +526,7 @@ function stageInstall(pkg, tarball, workDir) {
     issues.push('installed: scripts/telemetry-report.mjs is missing (the report alias would break)');
   }
 
-  return { issues, notes };
+  return { issues, warnings: licenses.warnings, notes };
 }
 
 function stageRegistry(pkg, offline) {
@@ -462,7 +585,17 @@ function safeRead(file) {
   }
 }
 
-const USAGE = 'Usage: node scripts/release-check.mjs [--skip-install] [--offline] [--json] [--build-parity] [--keep]\n';
+const USAGE = [
+  'Usage: node scripts/release-check.mjs [options]',
+  '',
+  '  --skip-install     pack and validate the manifest, but do not install it',
+  '  --offline          skip the registry duplicate-version probe',
+  '  --json             machine-readable result for tooling',
+  '  --build-parity     rebuild and fail if the committed lib/ went stale',
+  '  --keep             leave the temp tarball/consumer tree behind',
+  '  --print-changelog [version]',
+  '                     print the CHANGELOG section for a version (release notes)',
+].join('\n') + '\n';
 
 export function main(argv = []) {
   if (argv.includes('--help')) {
@@ -492,7 +625,23 @@ export function main(argv = []) {
     return 1;
   }
 
-  const manifest = validateManifest(pkg, { changelog: safeRead(path.join(ROOT, 'CHANGELOG.md')) || '' });
+  const changelog = safeRead(path.join(ROOT, 'CHANGELOG.md')) || '';
+
+  // --print-changelog [version]: the GitHub Release body comes from the
+  // changelog, never from a hand-copied summary. Empty output means no section.
+  if (argv.includes('--print-changelog')) {
+    const wanted = argv[argv.indexOf('--print-changelog') + 1];
+    const version = wanted && !wanted.startsWith('--') ? wanted : pkg.version;
+    const section = changelogSection(changelog, version);
+    if (!section) {
+      process.stderr.write('release-check: CHANGELOG.md has no section for ' + version + '\n');
+      return 1;
+    }
+    process.stdout.write(section + '\n');
+    return 0;
+  }
+
+  const manifest = validateManifest(pkg, { changelog });
   emit('manifest', manifest.issues, 'fail');
   emit('manifest', manifest.warnings, 'warn');
 
@@ -521,6 +670,7 @@ export function main(argv = []) {
     } else {
       const smoke = stageInstall(pkg, packed.tarball, workDir);
       emit('install', smoke.issues, 'fail');
+      emit('install', smoke.warnings || [], 'warn');
       emit('install', smoke.notes, 'note');
     }
 
