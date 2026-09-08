@@ -24,7 +24,11 @@
  *                  installed location, and the client bundle must keep its
  *                  Cordis module-loader wrapper. The resolved runtime closure
  *                  is license-audited on the way (one copyleft transitive dep
- *                  would change the terms of an MIT release).
+ *                  would change the terms of an MIT release). The same probe is
+ *                  then run against a pnpm install, because pnpm's isolated
+ *                  store - what a DSH profile uses - exposes a dependency that
+ *                  package.json forgot to declare, which npm's hoisting hides.
+ *                  It is skipped with a note when pnpm is not on PATH.
  *   5. registry  - the version must still be free on registry.npmjs.org
  *                  (and must be newer than what is already published).
  *
@@ -601,6 +605,43 @@ function stageRepository(pkg) {
   return checkRepositoryRemote(pkg, remote);
 }
 
+/**
+ * DSH installs plugins with pnpm under the hood, and pnpm defaults to an
+ * isolated node_modules layout: a dependency that lib/ imports but package.json
+ * does not declare resolves fine under npm's hoisting and fails hard under
+ * pnpm. Same probe, stricter store.
+ */
+function stagePnpmInstall(pkg, tarball, workDir) {
+  const probe = path.join(workDir, 'probe.mjs');
+  const version = tryPnpm(['--version'], { cwd: ROOT });
+  if (!version.ok) return { skipped: 'pnpm is not available on this shell - consumer check skipped' };
+  fs.mkdirSync(workDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workDir, 'package.json'),
+    JSON.stringify({ name: 'release-check-consumer-pnpm', version: '0.0.0', private: true, type: 'module' }, null, 2)
+  );
+  // pnpm has no --no-audit (npm-only flag); --ignore-scripts is its default in
+  // v10 anyway, and stating it keeps the check meaningful on older pnpm.
+  const add = tryPnpm(['add', '--ignore-scripts', '--reporter=append-only', tarball], { cwd: workDir });
+  if (!add.ok) {
+    return { issues: ['pnpm consumer install failed: ' + (firstLine(add.stderr) || firstLine(add.stdout))] };
+  }
+  if (!fs.existsSync(path.join(workDir, 'node_modules', pkg.name))) {
+    return { issues: ['pnpm consumer install produced no node_modules/' + pkg.name] };
+  }
+  fs.writeFileSync(probe, probeSource(pkg), 'utf8');
+  const res = tryRun(process.execPath, [probe], { cwd: workDir });
+  if (!res.ok) {
+    return { issues: ['pnpm (isolated store) could not load the published entries: ' + (firstLine(res.stderr) || firstLine(res.stdout))] };
+  }
+  return { notes: ['pnpm isolated-store install loads every published entry (' + version.stdout.trim() + ')'] };
+}
+
+function tryPnpm(args, opts = {}) {
+  const bin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+  return tryRun(bin, args, { ...opts, shell: true });
+}
+
 function stageRegistry(pkg, offline) {
   if (offline) return { issues: [], notes: ['registry probe skipped (--offline)'] };
   const exact = runNpm(['view', pkg.name + '@' + pkg.version, 'version', '--json'], { cwd: ROOT });
@@ -747,6 +788,12 @@ export function main(argv = []) {
       emit('install', smoke.warnings || [], 'warn');
       emit('install', smoke.notes, 'note');
     }
+
+    const pnpmWork = path.join(runRoot, 'consumer-pnpm');
+    const pnpmSmoke = stagePnpmInstall(pkg, packed.tarball, pnpmWork);
+    emit('install', pnpmSmoke.issues || [], 'fail');
+    emit('install', pnpmSmoke.notes || [], 'note');
+    if (pnpmSmoke.skipped) emit('install', [pnpmSmoke.skipped], 'note');
 
     const remote = stageRepository(pkg);
   emit('repository', remote.issues, 'fail');

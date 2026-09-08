@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # Runtime and dev dependencies. Grouped so a version bump lands as one PR
+  # instead of six; majors stay separate because a schemastery or js-yaml major
+  # can change how the config schema or settings.yaml parse.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    labels: [dependencies]
+
+  # The CI and release pipelines are code too: a broken action major turns
+  # publish-ready into not-releasable.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore(ci)
+    labels: [ci]
