@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a routing, failover or packaging problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This plugin runs on the DSH host plane and decides which provider/model a
+        subagent is dispatched to. The diagnostics snapshot asked for below
+        answers most of what we would otherwise have to ask you for.
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: npm ls dsh-plugin-subagents-orchestrator (or the version in package.json)
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version, profile and Node
+      placeholder: "dsh 0.1.1-rc.2, desktop profile, Node 22"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: subagents-orchestrator config
+      description: |
+        The settings.yaml section. Drop model or provider names you consider
+        private - the shape (strategy, mode, failover, endpoint count) is what matters.
+      render: yaml
+      placeholder: |
+        subagents-orchestrator:
+          enabled: true
+          strategy: round-robin
+          endpoints:
+            - provider: p1
+              model: m1
+    validations:
+      required: true
+  - type: textarea
+    id: symptoms
+    attributes:
+      label: What happened
+      description: Expected vs actual, and how to reproduce it
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics snapshot
+      description: |
+        Output of "pnpm report --json" (needs persistTelemetry on) or of
+        getDiagnosticsSnapshot() from the "./diagnostics" subpath. Neither
+        contains credentials.
+      render: text
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - routing / strategy
+        - failover / retry budget
+        - circuit breaker / cooldowns
+        - pool or fallback modes
+        - totalSubagents cap
+        - settings panel or GUI card
+        - telemetry / diagnostics
+        - packaging / install
+        - other

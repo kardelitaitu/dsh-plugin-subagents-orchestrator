@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator#readme
+    about: Configuration options, diagnostics and the install routes
+  - name: Security report
+    url: https://github.com/kardelitaitu/dsh-plugin-subagents-orchestrator/security/advisories/new
+    about: Please report vulnerabilities privately, not through an issue

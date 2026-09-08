@@ -130,16 +130,25 @@ pnpm report --events 50 --dir ~/.dsh/telemetry/subagents-orchestrator
 │   ├── telemetry.ts        # per-endpoint routing/failure/failover stats + debug event stream
 │   ├── persist.ts          # durable diagnostics: day-bucketed JSONL + endpoint snapshot
 │   ├── diagnostics.ts      # read-only live-state snapshot (./diagnostics subpath)
+│   ├── settings.ts         # settings-panel schema registered with dsh-settings
+│   ├── client/index.tsx    # GUI settings card (./client bundle, gated by ui.panel)
 │   └── types.ts            # Shared TypeScript contracts
 ├── tests/                  # Vitest suite (unit + plugin behavior, mock Cordis context)
-├── lib/                    # Build output (tsup: index.js, diagnostics.js + d.ts + sourcemaps)
+├── scripts/
+│   ├── telemetry-report.mjs # offline diagnostics reader (pnpm report)
+│   └── release-check.mjs    # publish preflight (pnpm run release:check)
+├── lib/                    # Committed build output (tsup ESM + d.ts + client bundle)
+├── .github/workflows/      # ci.yml (gate) + release.yml (tag -> npm publish)
+├── .githooks/pre-push      # local mirror of the blocking CI steps
 ├── cordis.patch.yml        # DSH Cordis profile patch definition
-├── package.json            # NPM package manifest
+├── package.json            # npm manifest (files / exports / dsh wiring)
 ├── CHANGELOG.md            # Release notes (Keep a Changelog)
 ├── README.md               # Project documentation
-├── CONTRIBUTING.md         # Concurrent-session protocol + dev conventions
-├── DESIGN-pool-fallback.md # Draft spec: pool/fallback modes (v2, parked)
-└── ROADMAP.md              # Future development roadmap
+├── CONTRIBUTING.md         # Dev conventions, concurrent sessions, releasing
+├── SECURITY.md             # Trust surface + vulnerability reporting
+├── ARCHITECTURE.md         # Host-contract facts (event surface, failure taxonomy)
+├── DESIGN-pool-fallback.md # Spec: pool/fallback endpoint modes (v2, shipped)
+└── ROADMAP.md              # Phase status
 ```
 
 ---
@@ -207,6 +216,15 @@ pnpm run release:check  # the publish gate: pack, install-the-tarball, registry 
 ```
 
 `release:check` does not trust `npm pack --dry-run`: it packs a real tarball, installs it into a throwaway consumer project and imports every published subpath (`.`, `./diagnostics`, the offline report script, the Cordis client wrapper) before npm ever sees it. Pushing a `vX.Y.Z` tag then runs the same gate in GitHub Actions and publishes with npm OIDC provenance - see [CONTRIBUTING.md](./CONTRIBUTING.md#releasing).
+
+---
+
+## More
+
+- [CONTRIBUTING.md](./CONTRIBUTING.md) - development setup, the host-plane safety invariants and the release procedure.
+- [SECURITY.md](./SECURITY.md) - what this plugin can and cannot see, and how to report a vulnerability privately.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) - the host contract facts (event surface, failure taxonomy, retry layering) behind the routing decisions.
+- [ROADMAP.md](./ROADMAP.md) - phase status.
 
 ---
 
