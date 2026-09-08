@@ -471,6 +471,41 @@ export function validateBundlePatch(patchText, pkg) {
 }
 
 /**
+ * Compare the ref a release was triggered by against the version in the
+ * manifest. Inline shell in a workflow is the one kind of code nothing runs
+ * until the day it matters, so the release tag guard lives here and is covered
+ * by the test suite instead.
+ *
+ * @param {string|null|undefined} refName the git ref name (v1.2.3, or main)
+ * @param {string} version package.json version
+ * @returns {{ issues: string[], notes: string[] }}
+ */
+export function checkReleaseTag(refName, version) {
+  const issues = [];
+  const notes = [];
+  const tag = String(refName || '').trim();
+  if (!tag) {
+    issues.push('no ref name given to --expect-tag (pass "$GITHUB_REF_NAME")');
+    return { issues, notes };
+  }
+  if (!tag.startsWith('v')) {
+    // A branch push or a workflow_dispatch on main: not the guard's business.
+    notes.push('ref "' + tag + '" is not a version tag - the tag/version guard does not apply');
+    return { issues, notes };
+  }
+  if (!SEMVER_RE.test(tag.slice(1))) {
+    issues.push('ref "' + tag + '" starts with v but is not a vX.Y.Z version tag');
+    return { issues, notes };
+  }
+  if (tag !== 'v' + version) {
+    issues.push('tag ' + tag + ' does not match package version v' + version + ' - refusing to publish the wrong number');
+    return { issues, notes };
+  }
+  notes.push('tag ' + tag + ' names the packaged version (' + version + ')');
+  return { issues, notes };
+}
+
+/**
  * The README installs this plugin with 'dsh plugin add github:owner/repo', and
  * npm renders repository.url on the package page. If the manifest and the
  * remote this checkout pushes to disagree, the published package advertises a
@@ -871,6 +906,8 @@ const USAGE = [
   '  --json             machine-readable result for tooling',
   '  --build-parity     rebuild and fail if the committed lib/ went stale',
   '  --require-clean    fail if any packaged file differs from HEAD (manual publish)',
+  '  --expect-tag [ref] check a release ref against the packaged version (default',
+  "                     \$GITHUB_REF_NAME); exit 1 on a mismatch",
   '  --keep             leave the temp tarball/consumer tree behind',
   '  --print-changelog [version]',
   '                     print the CHANGELOG section for a version (release notes)',
@@ -906,6 +943,20 @@ export function main(argv = []) {
   }
 
   const changelog = safeRead(path.join(ROOT, 'CHANGELOG.md')) || '';
+
+  // --expect-tag [ref]: the release tag guard. The workflow used to compare
+  // "v$(node -p ...)" against $GITHUB_REF_NAME in inline shell - the one piece
+  // of release logic no run ever exercised, because it only fires on a tag push.
+  // Here it is as code the suite covers.
+  if (argv.includes('--expect-tag')) {
+    const next = argv[argv.indexOf('--expect-tag') + 1];
+    const refName = next && !next.startsWith('--') ? next : process.env.GITHUB_REF_NAME || '';
+    const tagCheck = checkReleaseTag(refName, pkg.version);
+    for (const line of tagCheck.issues) process.stderr.write('  FAIL  tag: ' + line + '\n');
+    for (const line of tagCheck.notes) process.stdout.write('  ok    tag: ' + line + '\n');
+    process.stdout.write(tagCheck.issues.length ? 'BLOCKED - release tag check\n' : 'PASS - release tag check\n');
+    return tagCheck.issues.length ? 1 : 0;
+  }
 
   // --print-changelog [version]: the GitHub Release body comes from the
   // changelog, never from a hand-copied summary. Empty output means no section.

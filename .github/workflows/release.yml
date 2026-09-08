@@ -56,16 +56,13 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
+      # The guard is a preflight mode rather than inline shell here: a tag push
+      # is the only thing that can trigger a release, so shell in this step is
+      # code that never runs until release day. scripts/release-check.mjs needs
+      # no install (dependency-free), so a wrong tag still fails in seconds.
       - name: Tag must name the packaged version
         if: github.event_name == 'push'
-        run: |
-          set -e
-          version=$(node -p "require('./package.json').version")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match package version v$version"
-            exit 1
-          fi
-          echo "publishing dsh-plugin-subagents-orchestrator@$version"
+        run: node scripts/release-check.mjs --expect-tag "$GITHUB_REF_NAME"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

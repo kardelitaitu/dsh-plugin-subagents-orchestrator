@@ -17,6 +17,7 @@ import {
   checkRepositoryRemote,
   validateBundlePatch,
   dirtyPackagedPaths,
+  checkReleaseTag,
   auditLicenses,
   GIT_HOSTILE_SCRIPTS,
 } from '../scripts/release-check.mjs';
@@ -395,6 +396,20 @@ describe('release notes and licensing (publish preflight, part 2)', () => {
       expect(runs).toMatch(/package\/cordis\.patch\.yml/);
     });
 
+it('guards the release on the tag version through the tested script', () => {
+      const rel = load('.github/workflows/release.yml');
+      const steps = rel.jobs.gate.steps;
+      const idx = steps.findIndex((s: any) => /Tag must name/.test(s.name || ''));
+      expect(idx, 'the guard must exist').toBeGreaterThan(-1);
+      expect(steps[idx].if).toMatch(/github\.event_name == 'push'/);
+      // As a preflight mode, not inline shell nobody ever runs - and before the
+      // install, so a wrong tag costs seconds rather than a full pipeline.
+      expect(steps[idx].run).toMatch(/node scripts\/release-check\.mjs --expect-tag/);
+      expect(steps[idx].run).not.toMatch(/node -p/);
+      const installIdx = steps.findIndex((s: any) => /Install dependencies/.test(s.name || ''));
+      expect(idx).toBeLessThan(installIdx);
+    });
+
     it('declares the preflight as a package script', () => {
       expect(realPkg.scripts['release:check']).toContain('scripts/release-check.mjs');
       expect(realPkg.scripts['ci:local']).toContain('release-check.mjs');
@@ -593,5 +608,38 @@ describe('consumer probe covers the real host contract', () => {
     expect(probe).toMatch(/process\.env\.USERPROFILE = process\.cwd\(\)/);
     // And it must still terminate: apply() starts a config watcher.
     expect(probe).toMatch(/process\.exit\(0\)/);
+  });
+});
+
+describe('release tag guard (publish preflight, part 6)', () => {
+  const V = '1.2.0';
+
+  it('passes only when the tag names the packaged version', () => {
+    expect(checkReleaseTag('v' + V, V).issues).toEqual([]);
+    expect(checkReleaseTag('v' + V, V).notes.join('|')).toMatch(/names the packaged version/);
+  });
+
+  it('blocks a tag that would publish the wrong number', () => {
+    for (const tag of ['v0.0.0', 'v1.1.0', 'v1.2.1', 'v1.2.0-rc.1', 'v2.0.0']) {
+      const { issues } = checkReleaseTag(tag, V);
+      expect(issues.length, tag + ' must be blocked').toBe(1);
+      expect(issues[0]).toMatch(/does not match package version v1\.2\.0/);
+    }
+  });
+
+  it('steps aside for a non-tag ref, and rejects a v-tag that is not a version', () => {
+    expect(checkReleaseTag('main', V).issues).toEqual([]);
+    expect(checkReleaseTag('refs/heads/main', V).issues).toEqual([]);
+    expect(checkReleaseTag('release-1.2', V).issues).toEqual([]);
+    expect(checkReleaseTag('vv1.2.0', V).issues.join('|')).toMatch(/not a vX\.Y\.Z version tag/);
+  });
+
+  it('fails loudly when handed no ref at all', () => {
+    expect(checkReleaseTag('', V).issues.join('|')).toMatch(/no ref name given/);
+    expect(checkReleaseTag(undefined, V).issues.length).toBe(1);
+  });
+
+  it('agrees with the manifest in this repository', () => {
+    expect(checkReleaseTag('v' + realPkg.version, realPkg.version).issues).toEqual([]);
   });
 });
