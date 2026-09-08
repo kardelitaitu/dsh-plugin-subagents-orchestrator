@@ -491,8 +491,8 @@ describe('dirty-tree guard (publish preflight, part 5)', () => {
   const PACKAGED = ['lib', 'scripts/telemetry-report.mjs', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE'];
 
   it('reads porcelain v1 lines by column, not by first space', () => {
-    expect(dirtyPackagedPaths([' M lib/index.js', '?? lib/client.js.map'], PACKAGED)).toEqual({
-      dirty: ['lib/index.js', 'lib/client.js.map'],
+    expect(dirtyPackagedPaths([' M lib/index.js', '?? lib/index.d.ts'], PACKAGED)).toEqual({
+      dirty: ['lib/index.js', 'lib/index.d.ts'],
       clean: false,
     });
   });
@@ -514,7 +514,15 @@ describe('dirty-tree guard (publish preflight, part 5)', () => {
     expect(dirtyPackagedPaths([' M lib\\nested\\index.js'], PACKAGED).dirty).toEqual(['lib/nested/index.js']);
   });
 
-  it('treats a deleted packaged file as dirty (it would vanish from the tarball)', () => {
+  it('ignores rebuilt sourcemaps, which a Linux runner always rewrites', () => {
+    // The lib/ parity check has the same exclusion: maps embed sourcesContent
+    // byte-for-byte, so pnpm build on another platform is not a dirty tree.
+    const status = [' M lib/client.js.map', ' M lib/index.js.map'];
+    expect(dirtyPackagedPaths(status, PACKAGED).clean).toBe(true);
+    expect(dirtyPackagedPaths([' M lib/client.js.map', ' M lib/client.js'], PACKAGED).dirty).toEqual(['lib/client.js']);
+  });
+
+    it('treats a deleted packaged file as dirty (it would vanish from the tarball)', () => {
     expect(dirtyPackagedPaths([' D LICENSE'], PACKAGED).clean).toBe(false);
   });
 

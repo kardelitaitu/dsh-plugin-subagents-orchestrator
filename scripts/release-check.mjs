@@ -323,6 +323,7 @@ export function auditLicenses(packages, selfName) {
  *
  * The publish workflow packs from the tag, so this never bites there. It exists
  * for the manual route: a maintainer who runs npm publish in a shared checkout
+ * (lib/*.map files are ignored - see the note in the loop below)
  * would otherwise ship another session's half-finished src/ and lib/ rebuild as
  * an official release, with a version number nobody reviewed.
  *
@@ -340,6 +341,11 @@ export function dirtyPackagedPaths(statusLines, packaged) {
     if (arrow >= 0) path = path.slice(arrow + 4);
     path = path.replace(/^"|"$/g, '').replace(/\\/g, '/');
     if (!path) continue;
+    // Sourcemaps are excluded for the same reason the lib/ parity check excludes
+    // them: they embed sourcesContent byte-for-byte, so a Linux runner rebuilds
+    // a byte-different map after pnpm build. Failing a release on that would
+    // make the gate cry wolf on every tag.
+    if (path.endsWith('.map')) continue;
     const covered = (packaged || []).some((entry) => {
       const e = String(entry).replace(/^\.\//, '');
       return path === e || path.startsWith(e + '/') || (e.endsWith('/') && path.startsWith(e));
