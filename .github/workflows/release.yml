@@ -50,7 +50,7 @@ jobs:
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -139,7 +139,7 @@ jobs:
       # outranks the OIDC identity - so the token-free route would 401 on a
       # step that looks configured. The public registry is npm's default
       # anyway; auth is written explicitly below when a token exists.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
