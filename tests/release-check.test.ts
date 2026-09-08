@@ -42,6 +42,7 @@ function basePkg(overrides: Record<string, unknown> = {}): any {
     homepage: 'https://github.com/acme/demo-plugin#readme',
     keywords: ['demo'],
     main: 'lib/index.js',
+    types: 'lib/index.d.ts',
     files: ['lib', 'README.md', 'LICENSE', 'CHANGELOG.md'],
     exports: {
       '.': { types: './lib/index.d.ts', default: './lib/index.js' },
@@ -228,6 +229,32 @@ describe('scripts/release-check.mjs (publish preflight)', () => {
       expect(src).toContain('"."');
       expect(src).toContain('"./diagnostics"');
     });
+  });
+
+  it('demands a top-level types field when the package ships declarations', () => {
+    // Classic moduleResolution "node" ignores the exports map entirely, so
+    // without "types" those consumers get no types and no warning.
+    const noTypes = basePkg();
+    delete noTypes.types;
+    const { issues } = validateManifest(noTypes, { exists: alwaysExists });
+    expect(issues.join('|')).toMatch(/no top-level "types"/);
+
+    // A JS-only package needs none, and must not be failed for lacking it.
+    const jsOnly = basePkg({ exports: { '.': './lib/index.js' } });
+    delete jsOnly.types;
+    expect(validateManifest(jsOnly, { exists: alwaysExists }).issues).toEqual([]);
+
+    // Naming a types file the build did not produce is its own error.
+    const missing = validateManifest(basePkg({ types: 'lib/index.d.ts' }), {
+      exists: (p: string) => p !== 'lib/index.d.ts',
+    });
+    expect(missing.issues.join('|')).toMatch(/"types" -> lib\/index\.d\.ts does not exist/);
+  });
+
+  it('blocks a tarball that leaves the type declarations behind', () => {
+    expect(validatePackList(fullPack, basePkg()).issues).toEqual([]);
+    const dropped = fullPack.filter((f) => f !== 'lib/index.d.ts');
+    expect(validatePackList(dropped, basePkg()).issues.join('|')).toMatch(/types -> lib\/index\.d\.ts was not packed/);
   });
 
   // This is the actual gate, run as a test: whatever is committed today must
@@ -563,6 +590,14 @@ describe('dirty-tree guard (publish preflight, part 5)', () => {
 
     it('treats a deleted packaged file as dirty (it would vanish from the tarball)', () => {
     expect(dirtyPackagedPaths([' D LICENSE'], PACKAGED).clean).toBe(false);
+  });
+
+  it('counts package.json as packaged even when the allowlist omits it', () => {
+    // npm always ships the manifest (and README/LICENSE), so a dirty
+    // package.json is a dirty artifact - the one file a release cut edits last.
+    const PACKAGED_NO_MANIFEST = ['lib', 'README.md', 'LICENSE'];
+    const status = [' M package.json', ' M scripts/release-check.mjs'];
+    expect(dirtyPackagedPaths(status, PACKAGED_NO_MANIFEST).dirty).toEqual(['package.json']);
   });
 
   it('reports clean for an empty status', () => {

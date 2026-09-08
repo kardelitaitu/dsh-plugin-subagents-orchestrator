@@ -202,6 +202,19 @@ export function validateManifest(pkg, ctx = {}) {
     if (!exists(target)) issues.push('exports[' + subpath + '] -> ' + target + ' does not exist (run pnpm build before publishing)');
   }
 
+  // TypeScript consumers on the classic "node" moduleResolution never consult
+  // the exports map at all, so a package that ships declarations must also name
+  // them at the top level - otherwise those consumers import the plugin and get
+  // implicit any for every entry point, with nothing failing to say so.
+  const declarations = targets.filter((entry) => entry.target.endsWith('.d.ts'));
+  if (declarations.length) {
+    if (!pkg.types) {
+      issues.push('package.json: ships .d.ts entries but has no top-level "types" (legacy moduleResolution "node" consumers lose types)');
+    } else if (!exists(pkg.types)) {
+      issues.push('package.json: "types" -> ' + pkg.types + ' does not exist (run pnpm build before publishing)');
+    }
+  }
+
   // DSH plugin wiring
   const patch = pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch;
   if (!patch) warnings.push('package.json: dsh.bundle.patch is missing (dsh plugin add cannot register the bundle)');
@@ -257,6 +270,7 @@ export function validatePackList(packFiles, pkg) {
     if (!has(target)) issues.push('tarball: exports[' + subpath + '] -> ' + target + ' was not packed (consumers get ERR_MODULE_NOT_FOUND)');
   }
   if (pkg.main && !has(pkg.main)) issues.push('tarball: main -> ' + pkg.main + ' was not packed');
+  if (pkg.types && !has(pkg.types)) issues.push('tarball: types -> ' + pkg.types + ' was not packed');
   const patch = pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch;
   if (patch && !has(patch)) issues.push('tarball: dsh.bundle.patch -> ' + patch + ' was not packed');
   for (const file of set) {
@@ -340,6 +354,10 @@ export function auditLicenses(packages, selfName) {
  */
 export function dirtyPackagedPaths(statusLines, packaged) {
   const dirty = [];
+  // npm ships the manifest whatever "files" says, so package.json is always part
+  // of the packaged surface - and it is the last file a release cut edits, which
+  // is exactly the state a hand-run publish must not capture.
+  const shipped = [...(packaged || []), 'package.json'];
   for (const line of statusLines) {
     // Porcelain v1 is 'XY <path>' (renames as 'old -> new'); the path always
     // starts at column 3, and only the second status char matters for us.
@@ -353,7 +371,7 @@ export function dirtyPackagedPaths(statusLines, packaged) {
     // a byte-different map after pnpm build. Failing a release on that would
     // make the gate cry wolf on every tag.
     if (path.endsWith('.map')) continue;
-    const covered = (packaged || []).some((entry) => {
+    const covered = shipped.some((entry) => {
       const e = String(entry).replace(/^\.\//, '');
       return path === e || path.startsWith(e + '/') || (e.endsWith('/') && path.startsWith(e));
     });

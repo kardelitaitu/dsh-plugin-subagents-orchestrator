@@ -168,6 +168,16 @@ cycle, so this is also the first release the packaging gate was built for.
 - The release tag guard is preflight code with tests rather than inline shell in
   `release.yml`, and it runs on every gate event so a rehearsal exercises the
   command line a release uses.
+- The package names its declarations at the top level (`types`), not only
+  through `exports ".".types`. TypeScript consumers on the classic
+  `moduleResolution: "node"` never read the exports map at all, so they were
+  importing this plugin with no types and no signal that anything was missing. The
+  preflight now requires `types` whenever the package ships `.d.ts`
+  entries, checks the named file exists, and fails if a tarball leaves it behind.
+- The dirty-tree guard counts `package.json` as packaged even though the
+  `files` allowlist never names it - npm always ships the manifest, so a
+  half-committed version bump is precisely what that check exists to catch.
+
 - `scripts/` ships in the npm `files` manifest, so the `pnpm report`
   alias has its target in the published package.
 - The `prepare` lifecycle script is gone: it ran during a git-hosted
