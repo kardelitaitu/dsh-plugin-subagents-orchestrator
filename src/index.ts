@@ -167,6 +167,19 @@ export function apply(ctx: CordisContext): void {
     // Respect explicit model if already requested by caller
     if (request && request.agentOptions !== void 0) return request;
 
+    // Soft concurrency cap (v2): starts over the cap are never rejected,
+    // queued or stalled — they pass through unrouted. activeEndpoints tracks
+    // exactly the live subagent entries the plugin attributed (set at
+    // agent/request, cleared at agent/disposed), so its size IS the global
+    // live count for cap purposes.
+    const cap = config.totalSubagents;
+    if (typeof cap === 'number' && cap >= 0 && activeEndpoints.size >= cap) {
+      if (config.debug) {
+        console.debug(`subagents-orchestrator: start over cap (${activeEndpoints.size}/${cap}) passes through unrouted`);
+      }
+      return request;
+    }
+
     const picked = pickNextEndpoint(
       endpoints,
       config.strategy || 'round-robin',

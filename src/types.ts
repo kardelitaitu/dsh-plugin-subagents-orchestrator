@@ -33,6 +33,12 @@ export interface OrchestratorConfig {
   intervalMaxMs?: number;
   /** Same-endpoint retry budget: retries spent on the current endpoint before failing over to the next pool entry. */
   maxRetries?: number;
+  /**
+   * Soft concurrency cap on routed starts (v2). Starts over the cap are
+   * NEVER rejected, queued or stalled (host-plane invariant) — they pass
+   * through unrouted. Absent = unbounded.
+   */
+  totalSubagents?: number;
   /** Emit structured telemetry debug lines for every routing event. */
   debug?: boolean;
   /** Opt-in: flush telemetry events and endpoint stats to ~/.dsh/telemetry on dispose. */

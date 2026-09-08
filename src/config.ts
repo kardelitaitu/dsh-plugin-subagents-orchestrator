@@ -128,6 +128,7 @@ export function parseConfigDocument(doc: unknown): OrchestratorConfig | null {
   if (isFiniteNumber(section['intervalMinMs'])) config.intervalMinMs = section['intervalMinMs'];
   if (isFiniteNumber(section['intervalMaxMs'])) config.intervalMaxMs = section['intervalMaxMs'];
   if (isFiniteNumber(section['maxRetries'])) config.maxRetries = section['maxRetries'];
+  if (isFiniteNumber(section['totalSubagents'])) config.totalSubagents = section['totalSubagents'];
   if (typeof section['debug'] === 'boolean') config.debug = section['debug'];
   if (typeof section['persistTelemetry'] === 'boolean') config.persistTelemetry = section['persistTelemetry'];
 
