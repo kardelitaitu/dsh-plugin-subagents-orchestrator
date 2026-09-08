@@ -5,7 +5,8 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_PERSIST_DIR } from '../src/persist.js';
+import { DEFAULT_PERSIST_DIR, flushTelemetryToDisk, setPersistDirForTest } from '../src/persist.js';
+import { recordRequest, recordFailure, getEndpointStats, resetTelemetry } from '../src/telemetry.js';
 
 const exec = promisify(execFile);
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'telemetry-report.mjs');
@@ -109,5 +110,34 @@ describe('scripts/telemetry-report.mjs (offline diagnostics)', () => {
     // working; sanity-check the script still honors it.
     const { stdout } = await runScript(['--dir', dir]);
     expect(stdout).toContain(dir);
+  });
+
+  it('chain: production flush output is directly readable by the script', async () => {
+    // No hand-made fixtures: drive the REAL chain — telemetry records,
+    // flushTelemetryToDisk writes, the script consumes — so a contract
+    // drift between any two stages fails here instead of in production.
+    resetTelemetry();
+    recordRequest('chain-agent', { provider: 'p1', model: 'm1' });
+    recordFailure('chain-agent', { provider: 'p1', model: 'm1' }, 'RATE_LIMIT');
+    expect(getEndpointStats().length).toBeGreaterThan(0);
+
+    setPersistDirForTest(dir);
+    const result = flushTelemetryToDisk();
+    setPersistDirForTest(null);
+
+    expect(result.eventsWritten).toBe(2);
+    expect(result.snapshotWritten).toBe(true);
+
+    const { stdout, code } = await runScript(['--dir', dir, '--events', '10']);
+    expect(code).toBe(0);
+    expect(stdout).toContain('snapshot: 1 endpoint(s)');
+    expect(stdout).toContain('p1::m1');
+    expect(stdout).toContain('chain-agent');
+    expect(stdout).toContain('RATE_LIMIT');
+
+    const json = await runScript(['--json', '--dir', dir]);
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed.snapshot.endpoints[0]).toMatchObject({ provider: 'p1', model: 'm1', requests: 1, failures: 1 });
+    expect(parsed.recentEvents.map((e: any) => e.type)).toEqual(['request', 'failure']);
   });
 });
