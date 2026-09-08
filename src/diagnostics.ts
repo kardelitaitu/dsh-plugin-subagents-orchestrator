@@ -41,6 +41,12 @@ export interface EndpointDiagnostics {
     | 'latencyTotalMs'
     | 'latencyMaxMs'
     | 'lastLatencyMs'
+    | 'successes'
+    | 'successLatencySamples'
+    | 'successLatencyTotalMs'
+    | 'successLatencyMaxMs'
+    | 'lastSuccessLatencyMs'
+    | 'tokensTotal'
   >;
 }
 
@@ -89,7 +95,13 @@ const EMPTY_STATS = {
   latencySamples: 0,
   latencyTotalMs: 0,
   latencyMaxMs: 0,
-  lastLatencyMs: null
+  lastLatencyMs: null,
+  successes: 0,
+  successLatencySamples: 0,
+  successLatencyTotalMs: 0,
+  successLatencyMaxMs: 0,
+  lastSuccessLatencyMs: null,
+  tokensTotal: 0
 } as const;
 
 function toEndpointDiagnostics(endpoint: Endpoint, inPool: boolean, statsByKey: Map<string, EndpointStats>, now: number): EndpointDiagnostics {
@@ -109,7 +121,13 @@ function toEndpointDiagnostics(endpoint: Endpoint, inPool: boolean, statsByKey: 
       latencySamples: stats.latencySamples,
       latencyTotalMs: stats.latencyTotalMs,
       latencyMaxMs: stats.latencyMaxMs,
-      lastLatencyMs: stats.lastLatencyMs
+      lastLatencyMs: stats.lastLatencyMs,
+      successes: stats.successes,
+      successLatencySamples: stats.successLatencySamples,
+      successLatencyTotalMs: stats.successLatencyTotalMs,
+      successLatencyMaxMs: stats.successLatencyMaxMs,
+      lastSuccessLatencyMs: stats.lastSuccessLatencyMs,
+      tokensTotal: stats.tokensTotal
     }
   };
 }

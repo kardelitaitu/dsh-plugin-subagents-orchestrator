@@ -97,6 +97,12 @@ if (!snapshot) {
     if (typeof e.latencySamples === 'number' && e.latencySamples > 0) {
       parts.push(`fail-latency avg=${Math.round(e.latencyTotalMs / e.latencySamples)}ms max=${e.latencyMaxMs}ms`);
     }
+    if (typeof e.successLatencySamples === 'number' && e.successLatencySamples > 0) {
+      parts.push(`ok-latency avg=${Math.round(e.successLatencyTotalMs / e.successLatencySamples)}ms max=${e.successLatencyMaxMs}ms`);
+    }
+    if (typeof e.tokensTotal === 'number' && e.tokensTotal > 0) {
+      parts.push(`tokens=${e.tokensTotal}`);
+    }
     console.log(`  - ${e.key}  ${parts.join(' ')}`);
   }
 }
@@ -111,6 +117,8 @@ if (events.length > 0) {
     const from = ev.from ? ` ${ev.from.provider}::${ev.from.model} ->` : '';
     const to = ev.to ? ` ${ev.to.provider}::${ev.to.model}` : '';
     const code = ev.code ? ` [${ev.code}${typeof ev.hintMs === 'number' ? ` +${Math.round(ev.hintMs / 1000)}s` : ''}]` : '';
-    console.log(`    ${at}  ${ev.type.padEnd(8)} ${who}${from}${to}${code}`);
+    const span = typeof ev.successLatencyMs === 'number' ? ` ~${ev.successLatencyMs}ms` : '';
+    const toks = typeof ev.tokens === 'number' ? ` (${ev.tokens} tok)` : '';
+    console.log(`    ${at}  ${ev.type.padEnd(8)} ${who}${from}${to}${code}${span}${toks}`);
   }
 }
