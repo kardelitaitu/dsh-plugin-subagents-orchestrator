@@ -149,6 +149,48 @@ of the pending bumps:
   successor `pnpm/setup` action. The `version: 10` pin in both workflows is
   what keeps CI matching the pnpm 10 store layout the preflight smoke-tests.
 
+### Verifying the artifact the way the host does
+
+The preflight installs the tarball into a throwaway project, which proves the
+package. This proves the *plugin*: hand the packed tarball to the real host
+CLI and check what the profile ends up with. Run it as the last step before
+tagging, and again against the published version afterwards.
+
+```sh
+mkdir -p dist && npm pack --pack-destination dist   # npm will not create dist/
+dsh plugin --profile release-smoke add ./dist/dsh-plugin-subagents-orchestrator-<version>.tgz
+```
+
+Then confirm three things in the scratch profile directory -
+`~/.dsh/profiles/release-smoke` (on Windows,
+`%USERPROFILE%\.dsh\profiles\release-smoke`):
+
+- `package.json` `dsh.profile.bundles` lists `dsh-plugin-subagents-orchestrator`
+  next to `<dsh-base>` - that entry is what makes the host load the bundle,
+- `node_modules/dsh-plugin-subagents-orchestrator/lib/index.js` exists (pnpm used the
+  tarball, not your working tree - a `file:../../../../..` dependency here would mean
+  you installed a folder and learned nothing),
+- the profile can actually resolve the plugin and its dependencies, which is
+  what the publish preflight probe is for:
+
+```sh
+cd ~/.dsh/profiles/release-smoke
+node -e "import('dsh-plugin-subagents-orchestrator').then(m => console.log(m.name, typeof m.apply))"
+```
+
+That import resolving is the point: the profile store is strict about declared
+dependencies, so it also proves `js-yaml` reached the plugin.
+
+Delete the scratch profile when done: `cmd /c rmdir /s /q %USERPROFILE%\.dsh\profiles\release-smoke`
+(on POSIX, `rm -rf` the directory). Two cautions learned the hard way:
+
+- Setting `$HOME` or `$USERPROFILE` before `dsh plugin` does **not** sandbox it: the
+  host resolves profiles from the real user home, so always use a name you
+  recognise as scratch, and never run this against a profile you care about.
+- The host CLI forwards unknown flags to pnpm, and the first call against an
+  unknown `--profile` creates that profile. Read a real profile's
+  `cordis.patch.yml` instead of testing into it.
+
 ## Host-plane safety invariants
 
 Non-negotiable for any change to the plugin runtime:
