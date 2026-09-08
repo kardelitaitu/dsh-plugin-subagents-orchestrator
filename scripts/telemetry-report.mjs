@@ -2,8 +2,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
 
 /**
  * Offline diagnostics report for the subagents-orchestrator plugin.
@@ -25,19 +23,9 @@ const limit = eventsFlag >= 0 ? Math.max(1, Number(args[eventsFlag + 1]) || 20) 
 const dirFlag = args.indexOf('--dir');
 const dirOverride = dirFlag >= 0 ? args[dirFlag + 1] : null;
 
-// Resolve the persist dir independently of the plugin runtime (CLI context
-// may have no DSH env): the plugin package is resolvable from the profile
-// that installed it, but a plain default keeps this script always working.
+// Default storage root — mirrors DEFAULT_PERSIST_DIR in src/persist.ts
+// (guarded by a parity test). The --dir flag overrides it explicitly.
 function defaultDir() {
-  try {
-    const require = createRequire(path.dirname(fileURLToPath(import.meta.url)) + '/x.js');
-    const pkgRoot = path.dirname(require.resolve('dsh-plugin-subagents-orchestrator/package.json'));
-    const persist = require.resolve('dsh-plugin-subagents-orchestrator/lib/persist.js');
-    void persist; // existence proves the install; dir constant mirrors DEFAULT_PERSIST_DIR
-    void pkgRoot;
-  } catch {
-    // not installed as a resolvable package: fall through to the default location
-  }
   return path.join(os.homedir(), '.dsh', 'telemetry', 'subagents-orchestrator');
 }
 
