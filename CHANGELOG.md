@@ -6,6 +6,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- "Test Connection" probe in the settings panel (Phase 4, unblocked on DSH
+  0.1.2-rc.1): every endpoint row gains a Test action that sends a draft
+  `remote.llm.discoverModels('llm-pi-ai', { provider, baseURL })` through
+  the client→host Typert Remote channel — a live `GET {baseURL}/models`
+  whose stored profile credential resolves host-side (a one-shot key can be
+  typed instead; the draft is never saved). The result reports reachability
+  and latency, the advertised model list, and whether the configured model
+  is served, with its disclosed context window when present. The draft
+  `baseURL` prefills from the provider's stored `llm-pi-ai` profile via the
+  secret-redacted `remote.settings.describe()` view. The flow is
+  client-half-only and strictly read-only toward routing state; hosts
+  without the remote namespaces degrade the button to an explicit
+  unavailable notice. Documented in `ARCHITECTURE.md` §6.
+
 ## [1.2.0] - 2026-09-08
 
 Everything merged after the `v1.1.0` tag. Nothing reached npm before this
@@ -23,6 +39,24 @@ cycle, so this is also the first release the packaging gate was built for.
 - Failure-latency metrics per endpoint: the request-to-failure span is
   sampled into `latencySamples`/`latencyTotalMs`/`latencyMaxMs`/
   `lastLatencyMs` and exposed as `latencyMs` on failure events.
+- Success-side step spans and token throughput per endpoint (Phase 3): the
+  host exposes no request-completion event, so a span opened at
+  `agent/request` closes at the next same-agent boundary (a later step's
+  request, or `agent/turn-stopping` at the clean turn close). Spans whose
+  own (turn, step) failed are poisoned via `agent/request-error` /
+  `agent/error` and dropped, so errored turns never inflate successes.
+  Token deltas read the optional `ctx.tokenMeter.measure(session).
+  totalTokens` cumulative with a mark carried across mid-turn endpoint
+  switches (no double count); without the meter, spans record latency only.
+  Surfaced as `successes`/`successLatency*`/`tokensTotal` in endpoint stats,
+  the diagnostics snapshot, the panel card and `pnpm report` (`ok-latency`,
+  `tokens`).
+- Opt-in failover notices (`ui.toasts: true`): a committed failover injects a
+  collapsed plugin-notice row (`createUserMessage` with
+  `source.form: 'notice'`) into the failed subagent's transcript via
+  `agent.inject` — model-facing, non-waking, consumed by the retried step.
+  `@deepseek-ai/dsh-llm` is resolved lazily and optionally: hosts without a
+  resolvable module degrade to a debug line, never to a broken failover.
 - Read-only diagnostics snapshot (`./diagnostics` subpath):
   `getDiagnosticsSnapshot()` aggregates config presence, effective
   switches, the endpoint list with parked marking, breaker health and

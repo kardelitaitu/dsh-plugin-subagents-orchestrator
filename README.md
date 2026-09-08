@@ -81,7 +81,7 @@ subagents-orchestrator:
 | `intervalMaxMs` | `number` | `5000` | Upper bound of the randomized wait before a retried subagent request (failover pacing) |
 | `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |
 | `persistTelemetry` | `boolean` | `false` | Opt-in: on plugin dispose, flush buffered telemetry events (day-bucketed JSONL, 7-day retention) and an endpoint-stats snapshot to `~/.dsh/telemetry/subagents-orchestrator` for offline diagnostics |
-| `ui` | `object` | `{}` | Opt-in UI surfaces, all off by default so the plugin stays invisible: `ui.panel: true` registers an editable `subagents-orchestrator` section in the DSH settings surface (requires a plugin reload after flipping), `ui.toasts` gates the future failover-toast client surface (see ROADMAP) |
+| `ui` | `object` | `{}` | Opt-in UI surfaces, all off by default so the plugin stays invisible: `ui.panel: true` registers an editable `subagents-orchestrator` section in the DSH settings surface (requires a plugin reload after flipping) whose endpoint rows carry a **Test** action — a live probe through `remote.llm.discoverModels` that reports reachability, latency and whether the configured model is served (see `ARCHITECTURE.md` §6) — `ui.toasts: true` delivers a collapsed plugin-notice row into a subagent's transcript when it fails over (`agent.inject`, model-facing, non-waking; the live web-client push toast remains upstream-blocked — see ROADMAP) |
 | `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight?, enabled? }` endpoints (`weight` feeds the `"weighted"` strategy; `enabled: false` parks an endpoint — it stays in the config but is excluded from routing, failover targets and telemetry) |
 
 ---
@@ -97,17 +97,19 @@ const snapshot = getDiagnosticsSnapshot();
 // JSON-serializable: config presence, effective switches (active/strategy/
 // failover/pacing), every configured endpoint marked in-pool or parked,
 // per-endpoint circuit-breaker health (trippedUntil, streak) and telemetry
-// counters incl. failure-latency samples.
+// counters incl. failure-latency and success-span samples plus token totals.
 
 console.log(formatDiagnostics(snapshot));
 // subagents-orchestrator diagnostics @ 2026-09-08T...Z
 // config: present | active=true strategy=round-robin failover=true | ...
 // effective pool: 3 endpoint(s)
-// - p1::m1 [pool healthy req=12 fail=1 failover=0 fail-latency n=1 avg=800ms max=800ms]
+// - p1::m1 [pool healthy req=12 fail=1 failover=0 ok=10 ok-latency avg=4200ms max=9000ms fail-latency n=1 avg=800ms max=800ms tokens=84.2k]
 // - p2::m2 [parked healthy req=0 fail=0 failover=0]
 ```
 
 The snapshot is strictly non-mutating: breaker health is derived from the stored status rather than `isHealthy()`, whose probation transition is a state write — probing never changes routing behavior, touches the disk, or reads live references (every call returns fresh plain data). It is safe to call before `apply()`, after dispose, and with a missing or malformed settings file.
+
+**Success-side metrics without a completion event**: the host dispatch layer exposes no request-completion signal, so the plugin pairs boundaries instead. A span opens at `agent/request` and closes at the next same-agent boundary — a later step's request, or `agent/turn-stopping` (the turn commits its close only once the model owes no response, so the span's request completed). The span therefore measures the whole step (model call plus same-endpoint retry pacing), not raw provider latency. A span whose own (turn, step) failed is poisoned (`agent/request-error`, `agent/error`) and dropped, so errored turns can never inflate successes. Token deltas come from the optional `ctx.tokenMeter` composition (`measure(session).totalTokens` — provider-reported usage replayed from the durable log); without the meter, spans record latency only.
 
 **Offline diagnostics**: with `persistTelemetry: true`, the same data lands under `~/.dsh/telemetry/subagents-orchestrator` (day-bucketed JSONL events + endpoint snapshot, 7-day retention). A dependency-free reader prints it any time — even while DSH is running or after a crash:
 
@@ -132,6 +134,7 @@ pnpm report --events 50 --dir ~/.dsh/telemetry/subagents-orchestrator
 │   ├── diagnostics.ts      # read-only live-state snapshot (./diagnostics subpath)
 │   ├── settings.ts         # settings-panel schema registered with dsh-settings
 │   ├── client/index.tsx    # GUI settings card (./client bundle, gated by ui.panel)
+│   ├── client/testConnection.ts  # Test-Connection probe over the client→host remote.llm channel
 │   └── types.ts            # Shared TypeScript contracts
 ├── tests/                  # Vitest suite (unit + plugin behavior, mock Cordis context)
 ├── scripts/

@@ -35,11 +35,20 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
 
 ## 📊 Phase 3: Telemetry, Observability & User Notices
 
-- [ ] **Failover Notifications**:
-  - Push subtle UI session notices or status messages when a subagent fails over to another provider.
-- [ ] **Per-Endpoint Latency & Token Metrics**:
+- [x] **Failover Notifications**:
+  - Opt-in (`ui.toasts: true`) collapsed plugin-notice row delivered into the
+    failed subagent's transcript via `agent.inject` (non-waking; the retried
+    step sees the endpoint switch). Message construction uses
+    `createUserMessage` from `@deepseek-ai/dsh-llm`, resolved lazily — hosts
+    without a resolvable module degrade to no notice, never to a broken
+    failover.
+  - Live push to the web client remains **blocked upstream**: a
+    `SessionEventMap` extension point or an `API_REMOTE_FORWARDED_EVENTS`
+    entry (both closed to third-party plugins in DSH 0.1.1/0.1.2-rc.1) is
+    still required for true client-plane toasts. Re-evaluate on DSH upgrades.
+- [x] **Per-Endpoint Latency & Token Metrics**:
   - [x] Failure-latency metrics per endpoint (request-to-failure span: count/total/max/last, plus `latencyMs` on failure events) — distinguishes instant refusals from long hangs.
-  - [ ] Success-side response latency and token throughput: the host dispatch layer exposes no request-completion event (`agent/request` builds the config, failures surface via `agent/request-error`), so success metrics need a host-side completion signal first.
+  - [x] Success-side response latency and token throughput (boundary-paired): the host still exposes no request-completion event, but the agent loop re-dispatches `agent/request` per step and closes every turn at `agent/turn-stopping` — so a span opened at `agent/request` closes at the next same-agent boundary (step advance or turn stop). Spans whose own (turn, step) failed are poisoned via `agent/request-error` / `agent/error` and dropped. Token deltas read the optional `ctx.tokenMeter.measure(session).totalTokens` cumulative (provider-reported usage replayed from the durable log), attributed per closed span with a carried mark so mid-turn endpoint switches never double-count. Surfaced in the diagnostics snapshot, the panel card and `pnpm report` (`ok-latency` / `tokens`).
 - [x] **Log Integration**:
   - Structured debug logging (one JSON line per routing event via `console.debug`), enabled by the config `debug` flag or `DSH_ORCHESTRATOR_DEBUG=1` — reachable through `dsh` CLI diagnostics.
   - Offline diagnostics chain: live snapshot via the `./diagnostics` subpath, opt-in durable persistence (`persistTelemetry`) and the `scripts/telemetry-report.mjs` reader (see `ARCHITECTURE.md` §5; runs `pnpm report`).
@@ -58,10 +67,21 @@ This document outlines the planned evolutionary stages and milestones for `dsh-p
   entries (`{ provider, model, weight?, enabled? }`, identity required);
   YAML-only keys survive validation untouched. Malformed stored entries
   degrade the panel to the plain YAML path instead of breaking routing.
-- [ ] **Optional UI Card Component**:
+- [x] **Optional UI Card Component**:
   - Add optional settings panel in DSH Desktop settings to add, test, and toggle subagent endpoints interactively.
-  - "Test Connection" button with live ping and token check (blocked on a
-    client→host RPC channel for third-party remotes; see the toast note).
+  - [x] **"Test Connection" button with live ping and token check** — unblocked
+    on DSH 0.1.2-rc.1: the Typert Gateway serves any endpoint claimed by an
+    active host service (SRC fallback, no allowlist on the unary RPC path),
+    and `dsh-api-remotes` mounts the first-party `remote.llm`/
+    `remote.settings` namespaces client-side for every plugin panel. The
+    probe (`src/client/testConnection.ts`) sends a draft
+    `remote.llm.discoverModels('llm-pi-ai', { provider, baseURL })` — a live
+    `GET {baseURL}/models` that resolves the stored profile credential
+    host-side, so no secret enters the panel unless the user types one —
+    then reports reachability + latency, the advertised model list, and
+    whether the configured model is served (with its disclosed context
+    window). Strictly read-only toward routing state (see
+    `ARCHITECTURE.md` §6).
 - [ ] **Failover toasts (blocked upstream)**: live push to the web client
   requires either a `SessionEventMap` extension point or a new entry in
   `dsh-api-remotes`' compiled `API_REMOTE_FORWARDED_EVENTS` allowlist — both

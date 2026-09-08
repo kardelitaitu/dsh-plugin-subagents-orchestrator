@@ -16,11 +16,24 @@ context events a plugin can listen to:
 | `agent/request` | waterfall | `{ agent, turn, step, [request]` — produces the provider seed (`provider`, `model`, `reasoningEffort`) the host will use |
 | `agent/request-error` | waterfall | `{ agent, turn, step, provider, failure: LlmFailure, retryPolicy, signal }` |
 | `agent/pre-step` | hook | pre-step notification |
+| `agent/turn-stopping` | hook | `{ agent, turn, signal }` — the turn is about to close: the model owes no response, no tool is live |
+| `agent/error` | emit | `{ agent, turn, step, error }` — a step or turn errored |
 
-**There is no request-completion / success event.** Success-side latency is not
-observable from plugin hooks; only a request→failure span can be measured
-(telemetry implements exactly that). This is why per-endpoint latency metrics in
-Phase 3 are failure-latency only.
+**There is no request-completion / success event.** Raw per-request success
+latency is therefore not observable from plugin hooks. What 0.1.2 *does*
+guarantee are two same-agent boundaries the loop always reaches: it
+re-dispatches `agent/request` for every later step, and it closes every turn
+at `agent/turn-stopping` (data decides the close; a listener cannot force
+another step from there without steering). Telemetry exploits exactly that
+pairing (see §5): a span opened at `agent/request` closes at the NEXT
+same-agent boundary, giving a whole-step success span — an upper bound on
+raw provider latency that includes our own retry pacing. Spans whose own
+(turn, step) failed are poisoned at `agent/request-error` / `agent/error`
+and dropped, so a turn that stopped on an error can never be sampled as a
+success. Token throughput reads the optional `ctx.tokenMeter` composition
+(`measure(session).totalTokens` — provider-reported usage replayed from the
+durable log), attributed per closed span with a cumulative mark carried
+across mid-turn endpoint switches so retries never double-count.
 
 ### Failover decision contract
 
@@ -144,9 +157,10 @@ operable and strictly read-only toward the plugin runtime.
 
 `src/telemetry.ts` attributes every routed event to its endpoint (the
 identity recorded at `agent/request` time) and maintains per-endpoint
-counters plus failure-latency samples (request→failure span; success-side
-latency is unobservable — see §1). A bounded ring buffer keeps recent
-events for debug output. Two independent read paths exist:
+counters plus failure-latency samples (request→failure span) and success
+side step spans with token deltas (boundary-paired — see §1). A bounded
+ring buffer keeps recent events for debug output. Two independent read
+paths exist:
 
 - `./diagnostics` subpath — `getDiagnosticsSnapshot()` renders the live
   state (config, breaker health derived **without** the probation state
@@ -183,3 +197,73 @@ what the plugin held when it was disposed.
 Every stage fails soft and never mutates routing state. Diagnostics are
 consumers of the runtime, never participants: no probe path may trip a
 breaker, transition probation, or stall a subagent start.
+
+---
+
+## 6. The client→host RPC channel (Test Connection)
+
+The Phase 4 "Test Connection" button was long marked *blocked on a
+client→host RPC channel for third-party remotes*. Re-reading the installed
+host packages (DSH 0.1.2-rc.1) showed the blocker is gone: the Typert
+Gateway serves **any** endpoint claimed by an active host service, not just
+codegen-registered ones.
+
+### The verified wire path
+
+- **Host side (discovery):** the `dsh-api-gateway` controller accepts an
+  endpoint when `ctx.typert.local` registers it (compiler path) *or* when
+  its SRC fallback (`collectSrcClaims`) finds a registered service carrying
+  a `typertRemote` binding (`{ service, serviceKey, namespace }`) plus
+  prototype method markers
+  (`@deepseek-ai/dsh-typert-protocol/remote-methods`, `{ version: 1,
+  methods: [...] }`). Cordis `reflect` is prototypally inherited across
+  contexts (`Context.extend` = `Object.create(parent)`), so a service
+  provided by any plugin is discoverable from the gateway context. SRC
+  descriptors derive parameters from the method's identifier parameter
+  names (parsed via `Function.prototype.toString`) and validate results as
+  JSON-safe only — no typert codegen required.
+- **Client side (mount):** `dsh-api-remotes`' client half mounts the
+  first-party remote namespaces (`remote.llm`, `remote.settings`,
+  `remote.credentials`, …) through `ctx.remote.$mount(contribution)` with
+  generated strict-codec descriptors. Any client plugin — including this
+  panel — resolves `ctx.remote.llm` and calls its methods; the calls POST
+  to `/api/<namespace>/<method>` behind the browser-auth fence, with no
+  per-endpoint allowlist on the unary RPC path (unlike the *forwarded
+  events* allowlist, which stays closed).
+
+### How the probe uses it
+
+`src/client/testConnection.ts` implements the whole flow client-side; the
+host plane is untouched (the probe can never trip a breaker or transition
+probation — the §5 design rule holds):
+
+1. `remote.llm.discoverModels('llm-pi-ai', request)` routes a **draft**
+   request to the pi-ai discovery implementation, which performs a live
+   `GET {baseURL}/models` (protocol `openai-completions` or
+   `openai-responses`). The draft reads and writes nothing: no settings,
+   no credentials are consumed or mutated on the controller path — the
+   caller owns the draft. A draft naming a provider without a shipped
+   catalog resolves that stored profile's credential **host-side**, so the
+   panel never needs the secret.
+2. `remote.settings.describe()` (secret-redacted) prefills the draft
+   `baseURL` from the provider's stored `llm-pi-ai` profile record
+   (`providers[id].baseURL`) so a configured endpoint probes in one click.
+3. The result maps to the panel: reachability + latency, the advertised
+   model list, and whether the configured model is served — with its
+   disclosed `contextWindow` when the endpoint advertises one (the
+   "token check"). HTTP 401/403 surface as explicit "check the API key"
+   failures.
+
+### Robustness rules
+
+- Faces resolve **lazily at call time**; `ctx.remote` property access on a
+  host without the service throws (cordis refuses unprovided service
+  reads), which degrades to an explicit `unavailable` outcome — the panel
+  still renders and saves on older hosts.
+- The probe composes the caller signal with a 15 s client-side timeout via
+  `setTimeout` (no `AbortSignal.any`/`timeout`, newer than the bundle's
+  chrome100 target) and always disposes the listener.
+- `runEndpointTest` never throws; every failure mode resolves to a
+  structured `{ status: 'fail' | 'unavailable', message }` outcome.
+- The one-shot draft API key typed into the panel is passed per-request
+  and never persisted by the plugin (the draft is not saved anywhere).
