@@ -60,9 +60,13 @@ jobs:
       # is the only thing that can trigger a release, so shell in this step is
       # code that never runs until release day. scripts/release-check.mjs needs
       # no install (dependency-free), so a wrong tag still fails in seconds.
-      - name: Tag must name the packaged version
-        if: github.event_name == 'push'
-        run: node scripts/release-check.mjs --expect-tag "$GITHUB_REF_NAME"
+      # Unconditional on purpose: checkReleaseTag steps aside for a ref that is
+      # not a version tag, so a dispatch run still executes this command line
+      # (the rehearsal proves it) while a tag push is hard-gated. Dispatching
+      # with ref=v1.2.0 validates the tag too, which the push-only form could
+      # never show anyone.
+      - name: Ref must name the packaged version
+        run: node scripts/release-check.mjs --expect-tag "${{ github.ref_name }}"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

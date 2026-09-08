@@ -399,9 +399,12 @@ describe('release notes and licensing (publish preflight, part 2)', () => {
 it('guards the release on the tag version through the tested script', () => {
       const rel = load('.github/workflows/release.yml');
       const steps = rel.jobs.gate.steps;
-      const idx = steps.findIndex((s: any) => /Tag must name/.test(s.name || ''));
+      const idx = steps.findIndex((s: any) => /must name the packaged version/.test(s.name || ''));
       expect(idx, 'the guard must exist').toBeGreaterThan(-1);
-      expect(steps[idx].if).toMatch(/github\.event_name == 'push'/);
+      // Runs on every event: the guard tolerates a non-tag ref, so the
+      // rehearsal exercises the same command line a release uses.
+      expect(steps[idx].if, 'the guard must not be push-only').toBeFalsy();
+      expect(steps[idx].name).toMatch(/Ref must name the packaged version/);
       // As a preflight mode, not inline shell nobody ever runs - and before the
       // install, so a wrong tag costs seconds rather than a full pipeline.
       expect(steps[idx].run).toMatch(/node scripts\/release-check\.mjs --expect-tag/);
