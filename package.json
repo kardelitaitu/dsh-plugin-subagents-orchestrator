@@ -30,6 +30,7 @@
   "main": "lib/index.js",
   "files": [
     "lib",
+    "scripts",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
