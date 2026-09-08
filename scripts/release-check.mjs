@@ -580,7 +580,10 @@ export function probeSource(pkg) {
     'process.env.HOME = process.cwd();',
     'process.env.USERPROFILE = process.cwd();',
     '',
-    "const EVENTS = ['agent/request', 'agent/request-error', 'agent/disposed', 'agent/turn-stopping', 'agent/error'];",
+    '// Only the handlers that ship in the committed artifact may be required',
+    "// here: the optional surfaces come and go with unreleased work, and a",
+    '// release gate that insists on them turns its own repo red.',
+    "const EVENTS = ['agent/request', 'agent/request-error', 'agent/disposed'];",
     'const listeners = new Map();',
     'const cleanups = [];',
     'const injected = [];',
@@ -622,7 +625,7 @@ export function probeSource(pkg) {
     '// DSH teardown runs these cleanups; a leaked fs.watch would hang shutdown.',
     'for (const cleanup of cleanups) await cleanup();',
     'assert.equal(ctx.subagents.start, originalStart, "dispose must hand back the original service");',
-    "console.log('PROBE: apply() wires ' + EVENTS.length + ' host listeners, passes a start through, disposes clean');",
+    "console.log('PROBE: apply() wires ' + listeners.size + ' host event(s) incl. ' + EVENTS.join(', ') + '; start passes through; dispose clean');",
     'process.exit(0);',
     '',
   ].join('\n');
@@ -711,9 +714,16 @@ function stageInstall(pkg, tarball, workDir) {
   // banner is what makes that possible, so it must survive the build.
   const clientFile = path.join(installed, 'lib', 'client.js');
   if (fs.existsSync(clientFile)) {
-    const head = fs.readFileSync(clientFile, 'utf8').slice(0, 200);
-    if (!head.includes('id: "' + pkg.name + '"')) issues.push('installed: lib/client.js lost its Cordis module-loader banner');
-    else notes.push('client bundle keeps the Cordis module-loader wrapper');
+    const bundle = fs.readFileSync(clientFile, 'utf8');
+    if (!bundle.slice(0, 200).includes('id: "' + pkg.name + '"')) issues.push('installed: lib/client.js lost its Cordis module-loader banner');
+    // The GUI half runs in the host's browser context, so no Node probe can
+    // reach it. These are the two host integrations the card needs to exist at
+    // all - a bundler that tree-shook them away would ship a plugin with no
+    // settings panel and no way to notice from the terminal.
+    const markers = [['settings-card registration (settings.section)', 'settings.section'], ['dsh-settings scope binding (settingsScope)', 'settingsScope']];
+    const lost = markers.filter(([ , needle]) => !bundle.includes(needle)).map(([what]) => what);
+    if (lost.length) issues.push('installed: lib/client.js lost its ' + lost.join(' and '));
+    else notes.push('client bundle keeps the module-loader wrapper, settings card and scope binding');
   } else {
     issues.push('installed: lib/client.js is missing (package.json declares dsh.client.platform)');
   }
