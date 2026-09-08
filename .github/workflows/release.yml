@@ -1,0 +1,149 @@
+name: Release
+
+# Phase 5: publishing this plugin is a single git push.
+#
+#   pnpm run release:check                                  # publish preflight
+#   git tag -a vX.Y.Z -m "release X.Y.Z" && git push origin vX.Y.Z
+#
+# Pushing a vX.Y.Z tag re-runs the full CI gate, adds the publish preflight
+# (npm pack + install the tarball into a throwaway consumer project + registry
+# duplicate-version check), and publishes the packed tarball.
+#
+# Authentication uses npm's OIDC trusted publishing / provenance (id-token:
+# write below), so no long-lived token has to live in repository secrets.
+# Add an NPM_TOKEN secret instead and the publish step picks it up
+# automatically. Either way the npm account (or this GitHub repo, for trusted
+# publishing) must be allowed to publish the package name.
+#
+# Rehearse without publishing: Actions -> Release -> Run workflow, dry_run on.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or branch to run against (e.g. v1.2.0)'
+        required: true
+        default: 'main'
+      dry_run:
+        description: 'Run the whole pipeline but stop before npm publish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  gate:
+    name: Gate (verify + build + publish preflight)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Tag must name the packaged version
+        if: github.event_name == 'push'
+        run: |
+          set -e
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package version v$version"
+            exit 1
+          fi
+          echo "publishing dsh-plugin-subagents-orchestrator@$version"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (strict)
+        run: pnpm typecheck
+
+      - name: Test (vitest)
+        run: pnpm test
+
+      - name: Build (tsup ESM + dts)
+        run: pnpm build
+
+      # lib/ is committed so a git-hosted install (dsh plugin add github:...)
+      # ships a build; a stale lib/ would publish code that does not match src/.
+      - name: Committed lib/ matches the build
+        run: |
+          if git diff --quiet -- lib; then
+            echo "lib/ is current"
+          else
+            echo "::error::lib/ is stale - rebuild and commit it before tagging"
+            git --no-pager diff --stat -- lib
+            exit 1
+          fi
+
+      - name: Publish preflight (pack, install smoke, registry)
+        run: pnpm run release:check
+
+      - name: Pack the artifact to publish
+        run: |
+          set -e
+          mkdir -p dist
+          npm pack --pack-destination dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish to npm
+    needs: gate
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.dry_run != 'true' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Authenticate
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> "$HOME/.npmrc"
+            echo "npm: publishing with the NPM_TOKEN secret"
+          else
+            echo "npm: no NPM_TOKEN secret - using OIDC trusted publishing"
+          fi
+
+      - name: Publish
+        run: |
+          set -e
+          tarball=$(ls dist/*.tgz)
+          echo "publishing $tarball"
+          npm publish "$tarball" --provenance --access public
+
+      - name: Confirm the registry serves it
+        run: |
+          set -e
+          version=$(node -p "require('./package.json').version")
+          npm view "dsh-plugin-subagents-orchestrator@$version" version dist.tarball

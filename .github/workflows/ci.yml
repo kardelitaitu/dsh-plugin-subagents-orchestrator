@@ -40,6 +40,21 @@ jobs:
       - name: Package sanity (files manifest)
         run: npm pack --dry-run
 
+      # lib/ is committed so git-hosted installs (dsh plugin add github:...)
+      # ship a build; catch a lib/ that no longer matches src/.
+      - name: Committed lib/ matches the build
+        run: |
+          if git diff --quiet -- lib; then
+            echo "lib/ is current"
+          else
+            echo "::error::lib/ is stale - rebuild and commit it"
+            git --no-pager diff --stat -- lib
+            exit 1
+          fi
+
+      - name: Publish preflight (tarball install smoke)
+        run: pnpm run release:check
+
       - name: Upload build artifacts
         if: matrix.node == 22
         uses: actions/upload-artifact@v4

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-subagents-orchestrator",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Multi-endpoint load distributor and intelligent failover orchestrator for DeepSeek Harness subagents",
   "author": "Adikara",
   "license": "MIT",
@@ -28,9 +28,12 @@
   ],
   "type": "module",
   "main": "lib/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "lib",
-    "scripts",
+    "scripts/telemetry-report.mjs",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
@@ -65,7 +68,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "verify": "tsc --noEmit && vitest run",
-    "ci:local": "pnpm run verify && pnpm run build && npm pack --dry-run",
+    "ci:local": "pnpm run verify && pnpm run build && node scripts/release-check.mjs --offline",
+    "release:check": "node scripts/release-check.mjs",
+    "release:check:fast": "node scripts/release-check.mjs --skip-install --offline",
     "hooks:install": "git config core.hooksPath .githooks",
     "report": "node scripts/telemetry-report.mjs"
   },
