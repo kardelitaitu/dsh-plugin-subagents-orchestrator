@@ -65,6 +65,11 @@ interface DiagnosticsSnapshot {
         retryIntervalMinMs: number;
         retryIntervalMaxMs: number;
     };
+    /** Opt-in UI gates, exactly as configured (both false when unset). */
+    ui: {
+        toasts: boolean;
+        panel: boolean;
+    };
     /** Number of endpoints in the effective pool (parked endpoints excluded). */
     effectivePoolSize: number;
     /** Full configured endpoint list, including parked entries. */

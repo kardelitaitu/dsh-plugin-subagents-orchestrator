@@ -7,9 +7,20 @@ interface Endpoint {
     enabled?: boolean;
 }
 type RoutingStrategy = 'round-robin' | 'random' | 'weighted';
+/**
+ * Endpoint handling mode (v2):
+ * - `pool` (default): distribute across `endpoints` with `strategy`; a
+ *   configured `fallback` list is only a lower tier for failover.
+ * - `fallback`: stick to the primary set (`endpoints` — one entry means
+ *   sticky), descending the ordered `fallback` rescue chain only when the
+ *   current endpoint is actually abandoned by the failover machinery.
+ * A `fallback` mode with no usable rescue entries degrades to `pool`.
+ */
+type RoutingMode = 'pool' | 'fallback';
 interface OrchestratorConfig {
     enabled?: boolean;
     strategy?: RoutingStrategy;
+    mode?: RoutingMode;
     failover?: boolean;
     cooldownMs?: number;
     maxFailures?: number;
@@ -23,7 +34,20 @@ interface OrchestratorConfig {
     debug?: boolean;
     /** Opt-in: flush telemetry events and endpoint stats to ~/.dsh/telemetry on dispose. */
     persistTelemetry?: boolean;
+    /**
+     * Opt-in UI surfaces, all off by default so the plugin stays invisible.
+     * Gated client-plane features read these through the diagnostics snapshot.
+     */
+    ui?: OrchestratorUiConfig;
     endpoints?: Endpoint[];
+    /** Ordered rescue chain (fallback mode); lower tier under pool mode. */
+    fallback?: Endpoint[];
+}
+interface OrchestratorUiConfig {
+    /** Render a toast when a subagent fails over to another endpoint. */
+    toasts?: boolean;
+    /** Register the orchestrator panel in the DSH settings surface. */
+    panel?: boolean;
 }
 interface AgentSessionHeader {
     origin?: string;
