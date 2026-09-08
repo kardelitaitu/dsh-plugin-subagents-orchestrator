@@ -102,16 +102,54 @@ cycle, so this is also the first release the packaging gate was built for.
   differently). What must match is what a consumer loads - `lib/*.js` and
   `lib/*.d.ts`.
 - Release preflight (`scripts/release-check.mjs`, `pnpm run release:check`):
-  validates the publish metadata, packs a real tarball, installs it into a
-  throwaway consumer project and imports every Node-resolvable subpath
-  (host entry, diagnostics, report script, Cordis client wrapper), then
-  checks the version is still free on the registry. `--build-parity` also
-  proves the committed `lib/` matches a fresh build.
+  twelve checks over what a publish would actually ship. The manifest first
+  (publish metadata, the git-hostile lifecycle scripts, the `files`
+  allowlist rules, `publishConfig`), then the documents that must be inside
+  the tarball, then the Cordis bundle patch - a patch whose `id` is not the
+  published name installs cleanly and loads nothing, so nothing in the
+  artifact would ever look wrong.
+- The artifact is installed rather than inspected: a real `npm pack`; the
+  installed client bundle keeping its `settings.section` and `settingsScope`
+  wiring (the GUI half cannot be imported in Node, so structure is all that
+  can be asserted); `./package.json`; every Node-resolvable subpath; and the
+  plugin's host contract - `apply()` must inject and wrap the host
+  `subagents` service, register its `agent/*` listeners, pass an
+  unconfigured `start()` through untouched, and hand the original service
+  back on dispose. That install runs twice: npm, and pnpm with its isolated
+  store - the layout a DSH profile really uses, and the strict one that
+  exposes a dependency `package.json` forgot to declare, which npm hoisting
+  hides. The resolved runtime closure is license-audited (one copyleft
+  transitive dep would
+  change the terms of an MIT release), the offline report script runs from
+  its installed location, `repository.url` is compared with the origin
+  remote (a different repo name blocks, a different owner only warns, so a
+  fork's CI stays green), and the registry is probed for a duplicate version.
+- Preflight modes: `--build-parity` rebuilds and fails on a stale committed
+  `lib/`; `--require-clean` turns "a packaged path differs from HEAD" from
+  a warning into a failure - the flag to reach for before publishing by hand
+  in a shared checkout; `--expect-tag <ref>` is the release tag guard;
+  `--print-changelog` supplies the GitHub Release body from the changelog.
 - Tag-triggered publish workflow (`.github/workflows/release.yml`): pushing a
   `vX.Y.Z` tag re-runs the full gate and publishes to npm with OIDC registry
   provenance, so no access token is stored in repository secrets.
 - Pre-push hook (`.githooks/pre-push`) mirroring the blocking CI steps
   (typecheck + suite) so a red push cannot leave the machine.
+- CI covers the artifact handoff the publish job depends on
+  (`pack-release-artifact` -> `unpack-release-artifact`): pack, checksum, ship
+  it through the Actions store, read it back in a *different* job, and verify
+  the bytes survived, that it is still a readable npm tarball, and that `lib/`
+  and `cordis.patch.yml` came out of it while `src/` and `tests/` did not. The
+  download half of `release.yml` had never executed before this existed, and
+  it is the half an actions major bump can change underneath us.
+- Open-source health files: `SECURITY.md` (supported versions, what the plugin
+  does and does not touch, private-advisory reporting), issue and
+  pull-request templates, and `.github/dependabot.yml` for npm and Actions.
+- `tests/docs-config-parity.test.ts` cross-checks the README against the
+  implementation: the options table against the keys `parseConfigDocument`
+  actually reads (both directions, so an undocumented key fails and so does a
+  documented one that is never read), the documented defaults against the
+  exported constants, and the example YAML through the real parser so nothing
+  in the block people copy-paste can be silently dropped.
 
 ### Changed
 
@@ -123,6 +161,13 @@ cycle, so this is also the first release the packaging gate was built for.
 
 ### Fixed
 
+- The publish job no longer runs `actions/setup-node` with `registry-url`: with no
+  token configured that writes an `_authToken` placeholder into the runner npmrc,
+  and an explicit token entry outranks the OIDC identity npm provenance needs -
+  the first publish would have 401ed over a credential nobody had misconfigured.
+- The release tag guard is preflight code with tests rather than inline shell in
+  `release.yml`, and it runs on every gate event so a rehearsal exercises the
+  command line a release uses.
 - `scripts/` ships in the npm `files` manifest, so the `pnpm report`
   alias has its target in the published package.
 - The `prepare` lifecycle script is gone: it ran during a git-hosted
