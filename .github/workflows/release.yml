@@ -42,7 +42,7 @@ jobs:
     name: Gate (verify + build + publish preflight)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
@@ -125,7 +125,7 @@ jobs:
     steps:
       # Needed for the changelog-driven release notes below (the tarball
       # itself comes from the gate job's artifact).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
