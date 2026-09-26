@@ -288,7 +288,13 @@ export function recordTurnSuccess(agentId: string, tokens: number | undefined, n
   successSpans.delete(agentId);
   if (!span.failed) {
     // Explicit tokens win; otherwise the span's own sampled deltas attribute.
-    const effective = tokens !== undefined ? tokens : span.pendingTokens;
+    // A NON-finite override is not a measurement (a meter that exploded), so it
+    // must not suppress the deltas the span already sampled — treat it as
+    // absent and fall back to pendingTokens, exactly as if no meter were
+    // composed. This keeps the guard precise: it refuses a bad number, not the
+    // real accounting behind it.
+    const effective =
+      tokens !== undefined && Number.isFinite(tokens) ? tokens : span.pendingTokens;
     sampleSuccess(agentId, span.endpoint, span, now, effective);
   }
   return true;
@@ -318,22 +324,33 @@ function sampleSuccess(
   tokens: number | undefined
 ): void {
   const entry = ensureStats(endpoint);
-  const latencyMs = Math.max(0, now - span.at);
+  // A non-finite clock delta is not a measurement: refuse the sample instead
+  // of adding NaN/Infinity to the running aggregate, which would poison every
+  // later mean/max for the endpoint's whole lifetime. The success itself still
+  // counts — only its (unusable) latency is dropped.
+  const rawLatency = now - span.at;
+  const latencyMs = Number.isFinite(rawLatency) ? Math.max(0, rawLatency) : undefined;
   entry.successes += 1;
-  entry.successLatencySamples += 1;
-  entry.successLatencyTotalMs += latencyMs;
-  entry.successLatencyMaxMs = Math.max(entry.successLatencyMaxMs, latencyMs);
-  entry.lastSuccessLatencyMs = latencyMs;
+  if (latencyMs !== undefined) {
+    entry.successLatencySamples += 1;
+    entry.successLatencyTotalMs += latencyMs;
+    entry.successLatencyMaxMs = Math.max(entry.successLatencyMaxMs, latencyMs);
+    entry.lastSuccessLatencyMs = latencyMs;
+  }
   // Clamp once, before both consumers: the counter and the emitted event must
-  // never disagree about how many tokens the span was attributed.
-  const attributed = tokens === undefined ? undefined : Math.max(0, tokens);
+  // never disagree about how many tokens the span was attributed. A
+  // non-finite value is not a measurement (Math.max(0, NaN) is NaN and
+  // Math.max(0, Infinity) is Infinity), so treat it as absent rather than
+  // poisoning the running total for the process lifetime.
+  const attributed =
+    tokens === undefined || !Number.isFinite(tokens) ? undefined : Math.max(0, tokens);
   if (attributed !== undefined) entry.tokensTotal += attributed;
   emit({
     at: now,
     type: 'success',
     agentId,
     to: { ...endpoint },
-    successLatencyMs: latencyMs,
+    ...(latencyMs !== undefined ? { successLatencyMs: latencyMs } : {}),
     ...(attributed !== undefined ? { tokens: attributed } : {})
   });
 }
@@ -375,7 +392,11 @@ export function recordFailure(
   const entry = ensureStats(endpoint);
   entry.failures += 1;
   if (hintMs !== undefined) entry.cooldownHints += 1;
-  entry.lastFailureAt = now;
+  // A non-finite clock is not a timestamp. Storing it would serialize as null
+  // (indistinguishable from 'never failed') and could reorder consumers that
+  // compare it; keep the prior value instead. The failure and its code are
+  // facts we know, so they still record.
+  if (Number.isFinite(now)) entry.lastFailureAt = now;
   entry.lastFailureCode = code;
   // The span for the failed (turn, step) must never be sampled as a success
   // later — poison it up front (a retry re-opens a fresh span).
@@ -388,11 +409,16 @@ export function recordFailure(
   let latencyMs: number | undefined;
   if (start) {
     requestStarts.delete(agentId);
-    latencyMs = Math.max(0, now - start.at);
-    entry.latencySamples += 1;
-    entry.latencyTotalMs += latencyMs;
-    entry.latencyMaxMs = Math.max(entry.latencyMaxMs, latencyMs);
-    entry.lastLatencyMs = latencyMs;
+    // Same guard as the success path: a non-finite span is refused rather than
+    // poisoning the endpoint's running failure-latency aggregate forever.
+    const rawLatency = now - start.at;
+    if (Number.isFinite(rawLatency)) {
+      latencyMs = Math.max(0, rawLatency);
+      entry.latencySamples += 1;
+      entry.latencyTotalMs += latencyMs;
+      entry.latencyMaxMs = Math.max(entry.latencyMaxMs, latencyMs);
+      entry.lastLatencyMs = latencyMs;
+    }
   }
 
   emit({
