@@ -93,8 +93,6 @@ interface SuccessSpan {
   at: number;
   turn: unknown;
   step: unknown;
-  /** Token accounting for the span: last provider-reported/measured total seen. */
-  tokenMark: number | null;
   /** Token deltas sampled into this span, awaiting the close that attributes them. */
   pendingTokens?: number;
   /**
@@ -105,6 +103,14 @@ interface SuccessSpan {
   failed?: boolean;
 }
 const successSpans = new Map<string, SuccessSpan>();
+
+/**
+ * Cumulative token marks per agent. The session meter is cumulative for the
+ * WHOLE session, not for one span, so the mark must outlive a span close:
+ * scoping it to the span made every turn boundary forget the mark, and the
+ * next turn's first sample re-attributed the entire session total.
+ */
+const tokenMarks = new Map<string, number>();
 
 /**
  * In-flight request starts per agent, for failure-latency attribution: the
@@ -140,6 +146,15 @@ function emit(event: TelemetryEvent): void {
   if (isDebugEnabled()) {
     console.debug('[subagents-orchestrator]', JSON.stringify(event));
   }
+}
+
+/** Fresh plain-data copy of an event, including its nested endpoint refs. */
+function cloneEvent(event: TelemetryEvent): TelemetryEvent {
+  return {
+    ...event,
+    ...(event.from ? { from: { ...event.from } } : {}),
+    ...(event.to ? { to: { ...event.to } } : {})
+  };
 }
 
 function ensureStats(endpoint: TelemetryEndpointRef): EndpointStats {
@@ -229,11 +244,10 @@ function openSuccessSpan(
     endpoint: { ...endpoint },
     at: now,
     turn: meta?.turn,
-    step: meta?.step,
-    // The cumulative mark carries across spans of one agent so mid-turn
-    // endpoint switches never double-count tokens; the pending delta does
-    // NOT carry — a replaced span's tokens were its own attempt's.
-    tokenMark: previous?.tokenMark ?? null
+    step: meta?.step
+    // The cumulative token mark is agent-scoped (see tokenMarks), so it
+    // survives this replacement and every later turn boundary; the pending
+    // delta does NOT carry — a replaced span's tokens were its own attempt's.
   });
 }
 
@@ -243,14 +257,20 @@ function openSuccessSpan(
  * `cumulativeTokens` is the provider-reported total from the durable session
  * meter (e.g. `ctx.tokenMeter.measure(session).totalTokens`). The delta since
  * the span's previous mark is attributed to the span's endpoint; the mark
- * persists across span replacement within one agent so mid-turn retries do
- * not double-count tokens.
+ * persists across span replacement AND turn boundaries within one agent, so
+ * a session-cumulative meter is never double-counted.
  */
 export function recordTokenSample(agentId: string, cumulativeTokens: number, now: number = Date.now()): number | null {
   const span = successSpans.get(agentId);
   if (!span || !Number.isFinite(cumulativeTokens)) return null;
-  const delta = span.tokenMark === null ? cumulativeTokens : Math.max(0, cumulativeTokens - span.tokenMark);
-  span.tokenMark = cumulativeTokens;
+  // A cumulative meter must never produce a negative delta, on the first mark
+  // (no mark yet) as much as on a regression: the raw reading is clamped
+  // before it becomes either the delta or the stored mark, so a nonsensical
+  // negative total neither under-reports nor inflates the next delta.
+  const current = Math.max(0, cumulativeTokens);
+  const mark = tokenMarks.get(agentId);
+  const delta = mark === undefined ? current : Math.max(0, current - mark);
+  tokenMarks.set(agentId, current);
   span.pendingTokens = (span.pendingTokens ?? 0) + delta;
   return delta;
 }
@@ -304,14 +324,17 @@ function sampleSuccess(
   entry.successLatencyTotalMs += latencyMs;
   entry.successLatencyMaxMs = Math.max(entry.successLatencyMaxMs, latencyMs);
   entry.lastSuccessLatencyMs = latencyMs;
-  if (tokens !== undefined) entry.tokensTotal += Math.max(0, tokens);
+  // Clamp once, before both consumers: the counter and the emitted event must
+  // never disagree about how many tokens the span was attributed.
+  const attributed = tokens === undefined ? undefined : Math.max(0, tokens);
+  if (attributed !== undefined) entry.tokensTotal += attributed;
   emit({
     at: now,
     type: 'success',
     agentId,
     to: { ...endpoint },
     successLatencyMs: latencyMs,
-    ...(tokens !== undefined ? { tokens } : {})
+    ...(attributed !== undefined ? { tokens: attributed } : {})
   });
 }
 
@@ -337,6 +360,7 @@ export function getInFlightRequests(): number {
 export function forgetAgent(agentId: string): void {
   requestStarts.delete(agentId);
   successSpans.delete(agentId);
+  tokenMarks.delete(agentId);
 }
 
 /** Record a failure attributed to `endpoint`, including any cooldown hint that was applied. */
@@ -411,7 +435,7 @@ export function getEndpointStats(): EndpointStats[] {
  *  non-finite yields an empty list rather than the whole buffer. */
 export function getRecentEvents(limit: number = MAX_EVENT_BUFFER): TelemetryEvent[] {
   if (!Number.isFinite(limit) || limit <= 0) return [];
-  return eventBuffer.slice(-limit).map((event) => ({ ...event }));
+  return eventBuffer.slice(-limit).map(cloneEvent);
 }
 
 /** Forget all telemetry state (used between tests and on plugin dispose). */
@@ -420,6 +444,7 @@ export function resetTelemetry(): void {
   eventBuffer.length = 0;
   requestStarts.clear();
   successSpans.clear();
+  tokenMarks.clear();
   debugMode = 'auto';
 }
 
@@ -428,5 +453,5 @@ export function resetTelemetry(): void {
  * durable-flushing primitive for persist.ts. Returned events are copies.
  */
 export function drainRecentEvents(): TelemetryEvent[] {
-  return eventBuffer.splice(0, eventBuffer.length).map((event) => ({ ...event }));
+  return eventBuffer.splice(0, eventBuffer.length).map(cloneEvent);
 }
