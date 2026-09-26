@@ -121,12 +121,10 @@ describe('Round 3 - extreme weights', () => {
     expect(heavyCount).toBeGreaterThanOrEqual(299);
   });
 
-  // Pinned expected-failure: the body genuinely fails today (see // BUG below).
-  // FIXED in src/balancer.ts: weights are scale-normalized by their max before
-  // summing, so the total is bounded by the endpoint count and cannot overflow.
-  // These two tests were written as `it.fails` pins against the defect; they now
-  // assert the correct behavior directly. (Historical note: `it.fails` kept the
-  // to a HARD failure the moment the bug is fixed, so the pin cannot rot.
+  // Regression guard for the weight-overflow starvation, FIXED in
+  // src/balancer.ts: weights are scale-normalized by their max before summing,
+  // so the total is bounded by the endpoint count and cannot overflow.
+  // (Originally written as an `it.fails` pin while the defect was live.)
   it('REGRESSION: two 1e308 weights must not overflow the sum and starve every bucket but the last', () => {
     const w1: Endpoint = { provider: 'w1', model: 'm', weight: 1e308 };
     const w2: Endpoint = { provider: 'w2', model: 'm', weight: 1e308 };
@@ -138,17 +136,15 @@ describe('Round 3 - extreme weights', () => {
       seen.add(pickWeighted([w1, w2])!.provider);
     }
 
-    // BUG: src/balancer.ts:17-27. totalWeight === Infinity makes
-    // `randomVal = Math.random() * Infinity === Infinity`, and `Infinity - w`
-    // is Infinity for every finite w, so `randomVal <= 0` is never true: the
-    // loop falls through and the float-safety tail returns endpoints[last]
-    // on EVERY call. w1 (and any non-last bucket) is starved to exactly 0
-    // traffic. w2 should be ~50% here.
+    // Before the fix this starved w1 to exactly 0 traffic: totalWeight was
+    // Infinity, so `randomVal = Math.random() * Infinity` stayed Infinity and
+    // `randomVal <= 0` never held, falling through to the last bucket on every
+    // call. Both endpoints must now be reachable.
     expect(seen.has('w1')).toBe(true);
   });
 
-  // Pinned expected-failure: same defect, proven reachable through the real
-  // config trust boundary (parseConfigDocument -> extractEndpoints).
+  // Same guard through the real config trust boundary
+  // (parseConfigDocument -> extractEndpoints), proving the path is reachable.
   it('REGRESSION (reachable from config): 1e308 weights survive parseConfigDocument and route both endpoints', () => {
     const config = parseConfigDocument({
       'subagents-orchestrator': {
