@@ -693,7 +693,7 @@ export function probeSource(pkg) {
  * directly (EINVAL since the CVE-2024-27980 hardening), so prefer npm's own
  * CLI script next to the running node and fall back to a shell invocation.
  */
-function npmInvocation() {
+export function npmInvocation() {
   const nodeDir = path.dirname(process.execPath);
   const candidates = [
     path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
@@ -705,12 +705,12 @@ function npmInvocation() {
   return { bin: 'npm', prefix: [], shell: true };
 }
 
-function runNpm(args, opts = {}) {
+export function runNpm(args, opts = {}) {
   const inv = npmInvocation();
   return tryRun(inv.bin, [...inv.prefix, ...args], { ...opts, shell: inv.shell });
 }
 
-function tryRun(bin, args, opts = {}) {
+export function tryRun(bin, args, opts = {}) {
   try {
     return {
       ok: true,
@@ -732,7 +732,7 @@ function tryRun(bin, args, opts = {}) {
   }
 }
 
-function firstLine(s) {
+export function firstLine(s) {
   return String(s || '').split('\n').map((l) => l.trim()).filter(Boolean)[0] || '';
 }
 

@@ -72,7 +72,9 @@
     "ci:local": "pnpm run verify && pnpm run build && node scripts/release-check.mjs --offline",
     "release:check": "node scripts/release-check.mjs",
     "release:check:fast": "node scripts/release-check.mjs --skip-install --offline",
+    "release:verify": "node scripts/verify-release.mjs",
     "hooks:install": "git config core.hooksPath .githooks",
+    "deploy:local": "node -e \"const fs=require('fs'); const os=require('os'); const p=require('path'); const targets=[p.join(os.homedir(), '.dsh/profiles/tauri/node_modules/dsh-plugin-subagents-orchestrator'), p.join(os.homedir(), '.dsh/profiles/web/node_modules/dsh-plugin-subagents-orchestrator')]; for (const t of targets) { if (fs.existsSync(t)) { fs.cpSync('lib', p.join(t, 'lib'), { recursive: true }); fs.copyFileSync('package.json', p.join(t, 'package.json')); console.log('Synced to ' + t); } }\"",
     "report": "node scripts/telemetry-report.mjs"
   },
   "dependencies": {
