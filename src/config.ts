@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { load } from 'js-yaml';
 import type { OrchestratorConfig, OrchestratorUiConfig, Endpoint, RoutingStrategy } from './types.js';
+import { defaultCircuitBreaker } from './health.js';
 
 export const DEFAULT_SETTINGS_PATH = path.join(os.homedir(), '.dsh', 'settings.yaml');
 
@@ -50,16 +51,36 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 /**
+ * Whether an endpoint entry is usable: it carries a non-blank provider AND
+ * model. The single guard for both config trust boundaries (schema parsing and
+ * pool extraction) so a whitespace-only identity can never slip in as a
+ * routable endpoint that no provider route can resolve.
+ */
+function isUsableEndpoint(endpoint: Endpoint | null | undefined): boolean {
+  return Boolean(
+    endpoint &&
+      typeof endpoint.provider === 'string' &&
+      endpoint.provider.trim().length > 0 &&
+      typeof endpoint.model === 'string' &&
+      endpoint.model.trim().length > 0
+  );
+}
+
+/**
  * Schema-parse a single endpoint entry. Entries without a non-empty
  * string provider/model pair are rejected; unknown keys are dropped.
  */
 function parseEndpoint(raw: unknown): Endpoint | null {
   if (!isPlainObject(raw)) return null;
 
+  // Non-blank, not merely non-empty: a whitespace-only provider/model is a
+  // malformed entry that would be routed as an endpoint nothing can resolve.
+  // The value is kept verbatim (trimming is the user's business); it just has
+  // to carry at least one non-whitespace character to be usable.
   const provider = raw['provider'];
-  if (typeof provider !== 'string' || provider.length === 0) return null;
+  if (typeof provider !== 'string' || provider.trim().length === 0) return null;
   const model = raw['model'];
-  if (typeof model !== 'string' || model.length === 0) return null;
+  if (typeof model !== 'string' || model.trim().length === 0) return null;
 
   const endpoint: Endpoint = { provider, model };
 
@@ -132,6 +153,15 @@ export function parseConfigDocument(doc: unknown): OrchestratorConfig | null {
   if (typeof section['debug'] === 'boolean') config.debug = section['debug'];
   if (typeof section['persistTelemetry'] === 'boolean') config.persistTelemetry = section['persistTelemetry'];
 
+  if (typeof section['alignHourly'] === 'boolean') config.alignHourly = section['alignHourly'];
+  if (isPlainObject(section['quarantines'])) {
+    const q: Record<string, number> = {};
+    for (const [k, v] of Object.entries(section['quarantines'])) {
+      if (typeof v === 'number' && Number.isFinite(v)) q[k] = v;
+    }
+    config.quarantines = q;
+  }
+
   const ui = section['ui'];
   if (isPlainObject(ui)) {
     const uiConfig: OrchestratorUiConfig = {};
@@ -168,7 +198,7 @@ export function extractEndpoints(config: OrchestratorConfig | null): Endpoint[] 
     // `enabled: false` marks an endpoint as parked: it stays in the config for
     // bookkeeping but is excluded from the effective pool everywhere (routing,
     // failover candidates, telemetry attribution).
-    return config.endpoints.filter((e): e is Endpoint => Boolean(e && e.provider && e.model && e.enabled !== false));
+    return config.endpoints.filter((e): e is Endpoint => isUsableEndpoint(e) && e.enabled !== false);
   }
   return [];
 }
@@ -176,7 +206,7 @@ export function extractEndpoints(config: OrchestratorConfig | null): Endpoint[] 
 /** The usable rescue chain: configured `fallback` entries minus parked ones. */
 export function extractFallbackChain(config: OrchestratorConfig | null): Endpoint[] {
   if (config && Array.isArray(config.fallback) && config.fallback.length > 0) {
-    return config.fallback.filter((e): e is Endpoint => Boolean(e && e.provider && e.model && e.enabled !== false));
+    return config.fallback.filter((e): e is Endpoint => isUsableEndpoint(e) && e.enabled !== false);
   }
   return [];
 }
@@ -220,6 +250,27 @@ export function reloadConfig(): void {
  */
 function ensureLoaded(): void {
   if (!hasLoadedFromDisk && !watcher) reloadConfig();
+}
+
+/**
+ * Hydrate the circuit breaker from persisted config. Start-up only.
+ *
+ * This is deliberately NOT part of reloadConfig(): health state and config
+ * state have different authority. `quarantines` reflects what the user last
+ * decided (reset an endpoint, or leave it tripped), while every other field
+ * is derived from the file on each reload. Re-applying a file snapshot on
+ * every reload resurrects quarantines the user just cleared - the file is
+ * written by our own persistence path, so its snapshot is stale the instant
+ * a reset lands, and the debounced fs.watch would commit that staleness.
+ *
+ * Startup is the one moment the file is the freshest source of truth (no
+ * in-memory state exists yet), so hydration belongs here and nowhere else.
+ */
+export function hydrateQuarantinesFromConfig(): void {
+  const config = getConfig();
+  if (config?.quarantines) {
+    defaultCircuitBreaker.applyQuarantines(config.quarantines);
+  }
 }
 
 export function getConfig(): OrchestratorConfig | null {

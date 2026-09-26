@@ -51,6 +51,10 @@ export interface OrchestratorConfig {
   endpoints?: Endpoint[];
   /** Ordered rescue chain (fallback mode); lower tier under pool mode. */
   fallback?: Endpoint[];
+  /** Align cooldowns to the next clock hour (:00 + grace period). Default: true. */
+  alignHourly?: boolean;
+  /** Persisted map of active quarantine timestamps keyed by provider::model. */
+  quarantines?: Record<string, number>;
 }
 
 export interface OrchestratorUiConfig {
@@ -159,6 +163,14 @@ export interface FailoverState {
   index: number;
   /** Which list `index` refers to. Absent = primary (back-compat). */
   tier?: 'primary' | 'fallback';
+  /**
+   * Identity (`provider::model`) of the endpoint this failover committed to.
+   * The index is positional; a hot-reload that reorders the list would
+   * silently relocate the retry onto a different endpoint. Resolving by
+   * identity first keeps the commit pointing at the account it was made for,
+   * and the index is only a positional fallback.
+   */
+  targetKey?: string;
 }
 
 /** Provider seed produced by the host for an agent request (`agent/request` event). */
