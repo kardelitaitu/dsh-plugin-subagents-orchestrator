@@ -232,7 +232,13 @@ export function apply(ctx: CordisContext): void {
     refreshTelemetryDebug();
 
     const endpoints = getCachedEndpoints();
-    if (endpoints.length === 0) return request;
+    const fallbackChain = getCachedFallbackChain();
+    // A chain-only config (no usable primaries) is still routable: the rescue
+    // chain IS the pool then. The historical empty-pool bail-out predates the
+    // chain feature and stranded exactly the config the failover walk happily
+    // serves -- a start would pass through unrouted while the very same agent
+    // could fail over. Only a config with neither tier is unroutable.
+    if (endpoints.length === 0 && fallbackChain.length === 0) return request;
 
     // Respect explicit model if already requested by caller
     if (request && request.agentOptions !== void 0) return request;
@@ -264,7 +270,7 @@ export function apply(ctx: CordisContext): void {
     const anyPrimaryHealthy = endpoints.some(
       (e) => defaultCircuitBreaker.getStatus(e).trippedUntil === null || Date.now() >= (defaultCircuitBreaker.getStatus(e).trippedUntil as number)
     );
-    const chain = anyPrimaryHealthy ? [] : getCachedFallbackChain();
+    const chain = anyPrimaryHealthy ? [] : fallbackChain;
     const candidates = chain.length > 0 ? [...endpoints, ...chain] : endpoints;
 
     const picked = pickNextEndpoint(
@@ -601,23 +607,17 @@ export function apply(ctx: CordisContext): void {
       }
       if (nextIndex === -1) return next();
 
-      // Reserve nothing yet: the failover is committed only once the retry
-      // wait survives without an abort or dispose. Writing state before the
-      // wait recorded transitions (and telemetry) that could never happen.
-      // Pacing: hold the retry decision for the configured interval window so
-      // the provider's rate-limit window can drain before the next attempt.
-      await delayRetryWait(signal, resolveRetryDelayMs(config));
-
-      if (lifetimeDisposed || signal?.aborted) {
-        // The wait was cut short (plugin dispose or agent abort): the planned
-        // failover was never committed, so nothing may be recorded or rewritten
-        // behind the host's back. The retry decision itself is still returned
-        // promptly (the host checks the abort before acting on it).
-        return { kind: 'retry' };
-      }
-
       const target = nextTier === 'fallback' ? fallbackChain[nextIndex] : endpoints[nextIndex];
 
+      // Reserve the plan BEFORE the pacing wait so teardown can invalidate it.
+      // agent/disposed and plugin dispose both clear pendingFailovers; a plan
+      // written only AFTER the wait outlived that clear and resurrected a
+      // failover for an agent the host had already torn down. Agent ids are
+      // reusable, so the next request was silently rewritten onto a target the
+      // dead agent never reached. Reserving first makes the existing clear
+      // authoritative: the post-wait check below sees the missing entry and
+      // drops the commit, so no transition is recorded for a walk that did not
+      // survive the wait.
       pendingFailovers.set(agent.id, {
         count: current.count + 1,
         index: nextIndex,
@@ -628,6 +628,20 @@ export function apply(ctx: CordisContext): void {
         turn: payload.turn,
         step: payload.step
       });
+
+      // Pacing: hold the retry decision for the configured interval window so
+      // the provider's rate-limit window can drain before the next attempt.
+      await delayRetryWait(signal, resolveRetryDelayMs(config));
+
+      if (lifetimeDisposed || signal?.aborted || !pendingFailovers.has(agent.id)) {
+        // The wait was cut short (plugin dispose, agent abort, or the agent
+        // being disposed): the planned failover was never committed, so nothing
+        // may be recorded or rewritten behind the host's back. The retry
+        // decision itself is still returned promptly (the host checks the abort
+        // before acting on it).
+        pendingFailovers.delete(agent.id);
+        return { kind: 'retry' };
+      }
 
       recordFailover(agent.id, currentEndpoint, target);
 
@@ -745,12 +759,17 @@ export function apply(ctx: CordisContext): void {
       : tierList[current.index];
     if (!target) return next();
 
+    const seed = (await next()) as RequestSeed | null | undefined;
+    // Record only once the host actually built a request. The pass-through
+    // branch above guards on the same condition; recording before next() ran
+    // counted a request the host abandoned (null seed) as a real dispatch,
+    // opening a success span that `agent/turn-stopping` then sampled - a
+    // phantom request and a phantom success for an attempt that never left.
+    if (!seed) return seed;
+
     activeEndpoints.set(agent.id, target);
     activeSubagents.add(agent.id);
     recordRequest(agent.id, target, Date.now(), { turn: payload.turn, step: payload.step });
-
-    const seed = (await next()) as RequestSeed | null | undefined;
-    if (!seed) return seed;
 
     const { reasoningEffort: _effort, ...rest } = seed;
     return {
