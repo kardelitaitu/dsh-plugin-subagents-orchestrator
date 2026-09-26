@@ -26,7 +26,7 @@ When building complex projects with DeepSeek Harness, tasks are often delegated 
 - **Multi-Endpoint Load Balancing**: Evenly spreads subagent calls across different provider keys and endpoints (e.g. `b-ai-1`, `b-ai-2`, `b-ai-3`, `b-ai-4`, `b-ai-5`).
 - **Subagent-Only Error Failover**: Intercepts `agent/request-error` specifically for sessions where `origin === "subagent"`, preserving the main agent session integrity.
 - **Circuit-Breaker Health Tracking**: Endpoints that fail repeatedly are pulled from rotation for a cooldown window, then recover on probation — with graceful degradation to the full pool if every endpoint is down.
-- **Rate-Limit-Aware Cooldowns**: When a provider answers with `Retry-After` / `x-ratelimit-reset` headers, the endpoint trips immediately for exactly that window (capped at 15 minutes).
+- **Rate-Limit-Aware Cooldowns**: When a provider answers with `Retry-After` / `x-ratelimit-reset` headers, the endpoint trips immediately for exactly that window (capped at 24 hours, so an hourly quota window is never truncated).
 - **Endpoint Toggles**: Set `enabled: false` on an endpoint to park it (kept in config, excluded from routing, failover and telemetry) without deleting it.
 - **Structured Telemetry**: Optional per-endpoint routing/failure/failover event stream with recent-event and per-endpoint-stat snapshots; enable via the config `debug` flag or `DSH_ORCHESTRATOR_DEBUG=1`.
 - **Zero-Disk-I/O Config Cache**: Settings are parsed once into memory and served from there; a debounced `fs.watch` on `~/.dsh/settings.yaml` hot-reloads the cache, so reads are allocation-cheap and never hit the disk.
@@ -79,13 +79,15 @@ subagents-orchestrator:
 | `fallback` | `array` | `[]` | Ordered rescue chain `{ provider, model, ... }` (same shape as endpoints). In fallback mode it is tried after the primaries; in pool mode it is only a degradation tier used when every primary is tripped |
 | `totalSubagents` | `number` | `unbounded` | Soft concurrency cap on routed starts. Starts at or over the cap pass through unrouted - never rejected, queued or stalled - and a freed slot (agent disposed) resumes routing |
 | `failover` | `boolean` | `true` | Automatically failover to next endpoint on rate limits/errors |
-| `cooldownMs` | `number` | `60000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
+| `cooldownMs` | `number` | `3600000` | Circuit-breaker cooldown once an endpoint trips (a provider `Retry-After` / `x-ratelimit-reset` hint overrides both window and threshold) |
 | `maxFailures` | `number` | `3` | Consecutive failures before an endpoint trips |
 | `maxRetries` | `number` | `20` | Same-endpoint retry budget: an eligible failure is retried on the CURRENT endpoint this many times (each pause 3-5s via `intervalMinMs`/`intervalMaxMs`) before failing over to the next endpoint — every failover target starts with a fresh budget, and a provider `Retry-After` hint trips the endpoint instead of burning retries |
 | `intervalMinMs` | `number` | `3000` | Lower bound of the randomized wait before a retried subagent request (failover pacing; `0` disables the wait) |
 | `intervalMaxMs` | `number` | `5000` | Upper bound of the randomized wait before a retried subagent request (failover pacing) |
 | `debug` | `boolean` | `DSH_ORCHESTRATOR_DEBUG` | Emit structured telemetry debug lines for every routing event (an explicit value overrides the `DSH_ORCHESTRATOR_DEBUG=1` environment variable) |
 | `persistTelemetry` | `boolean` | `false` | Opt-in: on plugin dispose, flush buffered telemetry events (day-bucketed JSONL, 7-day retention) and an endpoint-stats snapshot to `~/.dsh/telemetry/subagents-orchestrator` for offline diagnostics |
+| `alignHourly` | `boolean` | `true` | Align cooldown to top of the next clock hour (`:00` + 1m grace) matching provider quota resets |
+| `quarantines` | `object` | `{}` | Map of quarantined endpoints `{ provider::model: unquarantineTimestamp }` for persistence across restarts |
 | `ui` | `object` | `{}` | Opt-in UI surfaces, all off by default so the plugin stays invisible: `ui.panel: true` registers an editable `subagents-orchestrator` section in the DSH settings surface (requires a plugin reload after flipping) whose endpoint rows carry a **Test** action — a live probe through `remote.llm.discoverModels` that reports reachability, latency and whether the configured model is served (see `ARCHITECTURE.md` §6) — `ui.toasts: true` delivers a collapsed plugin-notice row into a subagent's transcript when it fails over (`agent.inject`, model-facing, non-waking; the live web-client push toast remains upstream-blocked — see ROADMAP) |
 | `endpoints` | `array` | `[]` | List of `{ provider, model, reasoningEffort?, weight?, enabled? }` endpoints (`weight` feeds the `"weighted"` strategy; `enabled: false` parks an endpoint — it stays in the config but is excluded from routing, failover targets and telemetry) |
 

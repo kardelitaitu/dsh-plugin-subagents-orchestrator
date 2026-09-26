@@ -130,7 +130,7 @@ TIMEOUT, TRANSPORT]` (`dsh-llm/lib/index.js`).
    `agent/request` time (the host dispatches it before any request can fail).
    Unattributed errors defer to the host.
 5. **Rate-limit cooldowns** prefer the host-parsed `providerRetryAfterMs`
-   (capped at 15 min) over header sniffing.
+   (capped at 24 h) over header sniffing.
 
 ---
 
