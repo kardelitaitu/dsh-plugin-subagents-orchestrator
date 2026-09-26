@@ -59,7 +59,11 @@ export interface DiagnosticsSnapshot {
     /** Routing is active (`enabled` unset or true). */
     active: boolean;
     strategy: string;
-    /** Auto-failover on error is engaged (`failover: true`). */
+    /**
+     * Auto-failover on error is engaged. Mirrors the runtime gate in
+     * index.ts: failover defaults to on, and only an explicit
+     * `failover: false` (on an enabled config) disables the walk.
+     */
     failover: boolean;
     cooldownMs: number;
     maxFailures: number;
@@ -147,7 +151,16 @@ export function getDiagnosticsSnapshot(now: number = Date.now()): DiagnosticsSna
 
   const configured = config?.endpoints ?? [];
   const endpoints = configured.map((endpoint) =>
-    toEndpointDiagnostics(endpoint, poolKeys.has(`${endpoint.provider}::${endpoint.model}`), statsByKey, now)
+    toEndpointDiagnostics(
+      endpoint,
+      // Pool membership is per-entry, not per-key: a parked entry stays out of
+      // the pool even when an enabled twin shares its provider::model key
+      // (otherwise `inPool` would contradict both the documented contract and
+      // `effectivePoolSize`, which excludes parked entries).
+      endpoint.enabled !== false && poolKeys.has(`${endpoint.provider}::${endpoint.model}`),
+      statsByKey,
+      now
+    )
   );
 
   return {
@@ -156,8 +169,8 @@ export function getDiagnosticsSnapshot(now: number = Date.now()): DiagnosticsSna
     orchestration: {
       active: config !== null && config.enabled !== false,
       strategy: config?.strategy ?? 'round-robin',
-      failover: config?.failover === true,
-      cooldownMs: config?.cooldownMs ?? 60000,
+      failover: config !== null && config.enabled !== false && config.failover !== false,
+      cooldownMs: config?.cooldownMs ?? 3600000,
       maxFailures: config?.maxFailures ?? 3,
       retryIntervalMinMs: config?.intervalMinMs ?? 3000,
       retryIntervalMaxMs: config?.intervalMaxMs ?? 5000
