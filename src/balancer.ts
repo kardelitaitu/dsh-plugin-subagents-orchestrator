@@ -14,11 +14,21 @@ export function pickWeighted(endpoints: Endpoint[]): Endpoint | null {
   if (!endpoints || endpoints.length === 0) return null;
 
   const weights = endpoints.map((e) => Math.max(1, e.weight || 1));
-  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+
+  // Scale-normalize before summing. Selection probabilities are ratios, so
+  // dividing every weight by the largest one is behavior-preserving — but it
+  // bounds the sum by the endpoint count, so it can never overflow. Summing
+  // raw weights did: two finite 1e308 values add to Infinity, which made
+  // randomVal Infinity, the loop guard never true, and every pick fall through
+  // to the last endpoint (total starvation of the others). Such weights are
+  // accepted by the config schema, so this was reachable in practice.
+  const scale = Math.max(...weights);
+  const scaled = weights.map((w) => w / scale);
+  const totalWeight = scaled.reduce((sum, w) => sum + w, 0);
   let randomVal = Math.random() * totalWeight;
 
   for (let i = 0; i < endpoints.length; i++) {
-    randomVal -= weights[i];
+    randomVal -= scaled[i];
     if (randomVal <= 0) {
       return endpoints[i];
     }
