@@ -64,7 +64,15 @@ function readEvents(limitN) {
         if (out.length >= limitN) break;
         const trimmed = line.trim();
         if (!trimmed) continue;
-        try { out.push(JSON.parse(trimmed)); } catch { /* corrupt tail line */ }
+        // Only object-shaped lines are events. A valid-JSON primitive (null,
+        // a number, a bare string) or an array is not a TelemetryEvent, and
+        // pushing it here crashed the formatter below with
+        // "RangeError: Invalid time value" (persist.ts applies the same
+        // filter on its own read path).
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) out.push(parsed);
+        } catch { /* corrupt tail line */ }
       }
     } catch { /* unreadable bucket: skip */ }
   }
@@ -112,13 +120,18 @@ console.log(`  event buckets: ${buckets.length} day file(s)`);
 if (events.length > 0) {
   console.log(`  recent events (oldest → newest, last ${events.length}):`);
   for (const ev of events) {
-    const at = new Date(ev.at).toISOString();
+    // Never assume the timestamp renders: an out-of-range or missing value
+    // would throw RangeError and abort the whole report. Fall back to the raw
+    // value so the line still prints.
+    const when = typeof ev.at === 'number' && Number.isFinite(ev.at) ? new Date(ev.at) : null;
+    const at = when && !Number.isNaN(when.getTime()) ? when.toISOString() : String(ev.at);
     const who = ev.agentId;
     const from = ev.from ? ` ${ev.from.provider}::${ev.from.model} ->` : '';
     const to = ev.to ? ` ${ev.to.provider}::${ev.to.model}` : '';
     const code = ev.code ? ` [${ev.code}${typeof ev.hintMs === 'number' ? ` +${Math.round(ev.hintMs / 1000)}s` : ''}]` : '';
     const span = typeof ev.successLatencyMs === 'number' ? ` ~${ev.successLatencyMs}ms` : '';
     const toks = typeof ev.tokens === 'number' ? ` (${ev.tokens} tok)` : '';
-    console.log(`    ${at}  ${ev.type.padEnd(8)} ${who}${from}${to}${code}${span}${toks}`);
+    const type = typeof ev.type === 'string' ? ev.type : String(ev.type);
+    console.log(`    ${at}  ${type.padEnd(8)} ${who}${from}${to}${code}${span}${toks}`);
   }
 }
