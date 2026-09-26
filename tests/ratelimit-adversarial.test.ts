@@ -365,7 +365,7 @@ describe('Round 7: isHardRateLimitError requires BOTH a gate AND a keyword', () 
     expect(isHardRateLimitError({ code: 'SERVER', status: 429, message: 'rate limit exceeded' })).toBe(true);
   });
 
-  it('returns false for null / undefined / empty', () => {
+  it('isHardRateLimitError returns false for null / undefined / empty', () => {
     expect(isHardRateLimitError(null)).toBe(false);
     expect(isHardRateLimitError(undefined)).toBe(false);
     expect(isHardRateLimitError({})).toBe(false);
@@ -450,7 +450,7 @@ describe('Round 9: isClientSideError status/code/message discrimination', () => 
     expect(isClientSideError({ code: 'QUOTA', message: 'insufficient quota' })).toBe(false);
   });
 
-  it('returns false for null / undefined / empty', () => {
+  it('isClientSideError returns false for null / undefined / empty', () => {
     expect(isClientSideError(null)).toBe(false);
     expect(isClientSideError(undefined)).toBe(false);
     expect(isClientSideError({})).toBe(false);
