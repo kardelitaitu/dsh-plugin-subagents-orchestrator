@@ -84,16 +84,43 @@ function boundSummary(summary: string): string {
 }
 
 /**
+ * Format one endpoint as `provider/model`. Throws for an unusable ref so the
+ * delivery wrapper can degrade to 'failed' instead of leaking
+ * `undefined/undefined` into the model-facing notice.
+ */
+function endpointLabel(ref: NoticeEndpointRef | null | undefined): string {
+  const provider = ref?.provider;
+  const model = ref?.model;
+  if (
+    typeof provider !== 'string' || provider.length === 0 ||
+    typeof model !== 'string' || model.length === 0
+  ) {
+    throw new TypeError('failover notice requires a provider and model on both endpoints');
+  }
+  return `${provider}/${model}`;
+}
+
+/**
+ * Format the optional cooldown hint. A non-finite or non-numeric hint carries no
+ * duration information, so it is treated as absent rather than rendered as
+ * `NaNms` / `Infinityms`.
+ */
+function formatHint(hintMs: number | undefined): string | null {
+  return typeof hintMs === 'number' && Number.isFinite(hintMs) ? `cooldown hint ${hintMs}ms` : null;
+}
+
+/**
  * Build the one-line summary (collapsed transcript row) and the model-facing
  * notice text for a committed failover.
  */
 export function buildFailoverNotice(info: NoticeFailoverInfo): { summary: string; text: string } {
-  const from = `${info.from.provider}/${info.from.model}`;
-  const to = `${info.to.provider}/${info.to.model}`;
+  const from = endpointLabel(info.from);
+  const to = endpointLabel(info.to);
+  const hint = formatHint(info.hintMs);
   const reason =
-    info.code !== undefined && info.hintMs !== undefined
-      ? `${info.code}, cooldown hint ${info.hintMs}ms`
-      : info.code ?? (info.hintMs !== undefined ? `cooldown hint ${info.hintMs}ms` : 'connection failure');
+    info.code !== undefined && hint !== null
+      ? `${info.code}, ${hint}`
+      : info.code ?? hint ?? 'connection failure';
   const summary = boundSummary(`Failover: ${from} -> ${to} (${reason})`);
   const text =
     `[subagents-orchestrator] The endpoint ${from} failed with ${reason}; ` +
