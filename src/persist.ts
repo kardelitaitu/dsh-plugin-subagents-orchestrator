@@ -59,10 +59,33 @@ export function appendEvents(events: TelemetryEvent[], now: number = Date.now())
   const file = path.join(persistDir, eventFileName(now));
   try {
     const payload = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
-    fs.appendFileSync(file, payload, 'utf8');
+    // A crash mid-append can leave a partial line with no terminator. Appending
+    // straight onto it would glue this batch first event to that fragment and
+    // lose it forever, so start a fresh line when the file does not end in a newline.
+    // (The malformed fragment is then skipped by readPersistedEvents.)
+    const prefix = endsWithNewline(file) ? '' : '\n';
+    fs.appendFileSync(file, prefix + payload, 'utf8');
     return events.length;
   } catch {
     return 0;
+  }
+}
+
+/** Whether an existing file final byte is a newline (true when absent/empty). */
+function endsWithNewline(file: string): boolean {
+  try {
+    const size = fs.statSync(file).size;
+    if (size === 0) return true;
+    const fd = fs.openSync(file, 'r');
+    try {
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, size - 1);
+      return last[0] === 0x0a;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return true; // absent file: appendFileSync creates it and owns any error
   }
 }
 
@@ -123,7 +146,10 @@ export function readLatestSnapshot(): { at: number; endpoints: EndpointStats[] }
   }
 }
 
-/** Keep only the newest `MAX_PERSIST_DAYS` event buckets. Returns files removed. */
+/**
+ * Keep only the newest `MAX_PERSIST_DAYS` event buckets, always retaining the
+ * bucket for `now` even when other buckets are dated later. Returns files removed.
+ */
 export function pruneOldBuckets(now: number = Date.now()): string[] {
   try {
     if (!fs.existsSync(persistDir)) return [];
@@ -132,8 +158,14 @@ export function pruneOldBuckets(now: number = Date.now()): string[] {
       .filter((f) => /^events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
       .sort()
       .reverse();
+    // Keep the newest MAX_PERSIST_DAYS buckets AND always the bucket for the
+    // given instant: buckets dated ahead of it (clock stepped back, restored
+    // backup) must never evict the bucket this flush just wrote.
+    const keep = new Set(files.slice(0, MAX_PERSIST_DAYS));
+    keep.add(eventFileName(now));
     const removed: string[] = [];
-    for (const file of files.slice(MAX_PERSIST_DAYS)) {
+    for (const file of files) {
+      if (keep.has(file)) continue;
       try {
         fs.rmSync(path.join(persistDir, file), { force: true });
         removed.push(file);
