@@ -1,5 +1,6 @@
 import z from '@deepseek-ai/schemastery';
 import { getConfig } from './config.js';
+import { defaultCircuitBreaker } from './health.js';
 
 /**
  * DSH settings-surface integration (Tier B): register the orchestrator's
@@ -40,6 +41,7 @@ export const endpointSettingsSchema = z
   .object({
     provider: z.string().required(),
     model: z.string().required(),
+    reasoningEffort: z.string(),
     weight: z.number(),
     enabled: z.boolean()
   }) as unknown as SettingsSchema;
@@ -67,7 +69,9 @@ export const orchestratorSettingsSchema = z
       panel: z.boolean()
     }),
     endpoints: z.array(endpointSettingsSchema),
-    fallback: z.array(endpointSettingsSchema)
+    fallback: z.array(endpointSettingsSchema),
+    alignHourly: z.boolean(),
+    quarantines: z.dict(z.number())
   }) as unknown as SettingsSchema;
 
 export interface SettingsPanelContext {
@@ -75,11 +79,46 @@ export interface SettingsPanelContext {
   inject(deps: string[], cb: (sctx: unknown) => void): void;
 }
 
+export interface SettingsRegistrationScope {
+  get(): unknown;
+  watch(cb: (next: unknown) => void): (() => void) | void;
+  update?(patch: unknown): Promise<unknown>;
+  replace?(section: unknown): Promise<unknown>;
+}
+
 export interface SettingsService {
-  register(ns: string, schema: unknown, options?: { base?: unknown }): {
-    get(): unknown;
-    watch(cb: (next: unknown) => void): void;
-  };
+  register(ns: string, schema: unknown, options?: { base?: unknown }): SettingsRegistrationScope;
+  update?(ns: string, patch: unknown, expectedRevision?: unknown): Promise<unknown>;
+  mutate?(ns: string, ops: unknown[], expectedRevision?: unknown): Promise<unknown>;
+}
+
+let activeSettingsService: SettingsService | null = null;
+let activeRegistrationScope: SettingsRegistrationScope | null = null;
+
+export function getActiveSettingsService(): SettingsService | null {
+  return activeSettingsService;
+}
+
+export function getActiveRegistrationScope(): SettingsRegistrationScope | null {
+  return activeRegistrationScope;
+}
+
+export function resetSettingsForTest(): void {
+  activeSettingsService = null;
+  activeRegistrationScope = null;
+}
+
+/**
+ * Release the module-level settings handles on plugin dispose.
+ *
+ * These are module singletons, so a host reload (dispose -> apply) would
+ * otherwise keep writing through the PREVIOUS composition's registration -
+ * a handle the host has already torn down. Clearing them makes the next
+ * apply() resolve the live service instead of a dead one.
+ */
+export function disposeSettings(): void {
+  activeSettingsService = null;
+  activeRegistrationScope = null;
 }
 
 /**
@@ -95,8 +134,31 @@ export function armSettingsPanel(ctx: SettingsPanelContext): boolean {
   ctx.inject(['settings'], (sctx) => {
     const settings = (sctx as { settings?: SettingsService } | null)?.settings;
     if (!settings) return;
+    activeSettingsService = settings;
     try {
-      settings.register(ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, { base: {} });
+      const scope = settings.register(ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, { base: {} });
+      activeRegistrationScope = scope;
+
+      // Hydrate circuit breaker from persisted settings if present.
+      // Best-effort in its OWN try: a host whose stored section cannot be
+      // read back (get() throwing - exactly the malformed-section case this
+      // file guards against) must not take the live watch down with it, or
+      // UI -> breaker propagation is silently dead for the whole session.
+      try {
+        const snap = scope?.get?.() as any;
+        if (snap?.quarantines && typeof snap.quarantines === 'object') {
+          defaultCircuitBreaker.applyQuarantines(snap.quarantines);
+        }
+      } catch {
+        // Hydration only; the watch below is the panel's actual purpose.
+      }
+
+      // Watch for settings changes from UI
+      scope?.watch?.((next: any) => {
+        if (next && typeof next === 'object' && 'quarantines' in next) {
+          defaultCircuitBreaker.applyQuarantines(next.quarantines || {});
+        }
+      });
     } catch {
       // A stored section our schema rejects would fail registration loud;
       // degrade to the plain YAML path instead of failing the plugin.
@@ -104,3 +166,23 @@ export function armSettingsPanel(ctx: SettingsPanelContext): boolean {
   });
   return true;
 }
+
+/**
+ * Persist quarantine map into ~/.dsh/settings.yaml through host settings service.
+ */
+export async function persistQuarantines(quarantines: Record<string, number>): Promise<void> {
+  try {
+    if (activeSettingsService?.mutate) {
+      await activeSettingsService.mutate(ORCHESTRATOR_SETTINGS_NAMESPACE, [
+        { op: 'set', path: ['quarantines'], value: quarantines }
+      ]);
+    } else if (activeRegistrationScope?.update) {
+      await activeRegistrationScope.update({ quarantines });
+    } else if (activeSettingsService?.update) {
+      await activeSettingsService.update(ORCHESTRATOR_SETTINGS_NAMESPACE, { quarantines });
+    }
+  } catch {
+    // Non-fatal if settings persistence fails or service not available
+  }
+}
+
