@@ -17,15 +17,20 @@ export function parseResetTimestampMs(text: string | null | undefined, now: numb
   if (!text || typeof text !== 'string') return null;
 
   // 1. "reset at 2026-09-24 05:17:08 UTC+8" or ISO format
-  const atMatch = text.match(/resets?\s+at\s+(\d{4}-\d{2}-\d{2})[T\s]+(\d{2}:\d{2}:\d{2})(\.\d+)?\s*(UTC[+-]\d{1,2}(?::?\d{2})?|GMT[+-]\d{1,2}(?::?\d{2})?|[+-]\d{2}:?\d{2}|Z)?/i);
+  // The offset may be wrapped in brackets/parens ("(UTC+8)", "[UTC+8]"). An
+  // unrecognised tz token must not silently fall back to the machine's LOCAL
+  // zone, which yields a TZ-dependent wrong instant.
+  const atMatch = text.match(/resets?\s+at\s+(\d{4}-\d{2}-\d{2})[T\s]+(\d{2}:\d{2}(?::\d{2})?)(\.\d+)?\s*(?:(?:[([\[])?(UTC[+-]\d{1,2}:?\d{0,2}|GMT[+-]\d{1,2}:?\d{0,2}|[+-]\d{1,2}:?\d{0,2}|Z)(?:[)\]])?)?/i);
   if (atMatch) {
     const datePart = atMatch[1];
-    const timePart = atMatch[2];
+    const timePart = atMatch[2].length === 5 ? `${atMatch[2]}:00` : atMatch[2];
     const fracPart = atMatch[3] || '';
     const tzPart = atMatch[4];
     let iso = `${datePart}T${timePart}${fracPart}`;
     if (tzPart) {
-      const tzMatch = tzPart.match(/(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?/i);
+      // Anchored with $ so a 3-digit compact offset ('+530') backtracks to
+      // hours=5/minutes=30 instead of being read as hours=53.
+      const tzMatch = tzPart.match(/^(?:UTC|GMT)?([+-])(\d{1,2}):?(\d{2})?$/i);
       if (tzMatch) {
         const sign = tzMatch[1];
         const hours = tzMatch[2].padStart(2, '0');
@@ -168,8 +173,11 @@ export function isHardRateLimitError(failure: FailureInfo | null | undefined): b
   if (!failure) return false;
   const msg = asLower(failure.message);
   const code = asUpper(failure.code);
+  // Resolve the status from the top level OR the response envelope, mirroring
+  // isClientSideError: a 429 carried only in the envelope must still gate.
+  const status = (failure.status ?? (failure.response as { status?: unknown })?.status) as number | undefined;
 
-  if (code === 'QUOTA' || code === 'RATE_LIMIT' || code === 'INSUFFICIENT_QUOTA' || (failure.status === 429)) {
+  if (code === 'QUOTA' || code === 'RATE_LIMIT' || code === 'INSUFFICIENT_QUOTA' || (status === 429)) {
     if (
       msg.includes('frequency limit') ||
       msg.includes('6004') ||
@@ -179,7 +187,8 @@ export function isHardRateLimitError(failure: FailureInfo | null | undefined): b
       msg.includes('insufficient quota') ||
       msg.includes('daily request limit') ||
       msg.includes('out of credits') ||
-      msg.includes('reset at')
+      msg.includes('reset at') ||
+      msg.includes('resets at')
     ) {
       return true;
     }
