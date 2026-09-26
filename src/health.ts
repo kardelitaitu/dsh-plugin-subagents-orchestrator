@@ -16,6 +16,11 @@ export interface EndpointHealthStatus {
   trippedUntil: number | null;
   lastFailureAt: number | null;
   /**
+   * When the CURRENT trip began. Anchors the in-cooldown extension ceiling so
+   * repeated probing cannot push recovery out indefinitely.
+   */
+  trippedSince?: number | null;
+  /**
    * Timestamps of recent trips (v2 flapping guard). Pruned against
    * FLAP_WINDOW_MS on every trip; an endpoint exceeding
    * FLAP_TRIP_THRESHOLD within the window draws the extended penalty.
@@ -25,8 +30,8 @@ export interface EndpointHealthStatus {
 
 /** Consecutive failures tolerated before an endpoint is tripped. */
 export const DEFAULT_MAX_FAILURES = 3;
-/** How long a tripped endpoint stays out of rotation (ms). */
-export const DEFAULT_COOLDOWN_MS = 60_000;
+/** How long a tripped endpoint stays out of rotation (ms) - 60 minutes default. */
+export const DEFAULT_COOLDOWN_MS = 60 * 60_000;
 /** Flapping guard: trips within FLAP_WINDOW_MS that trigger the penalty. */
 export const FLAP_TRIP_THRESHOLD = 3;
 /** Flapping guard: how far back trips are counted (ms). */
@@ -67,7 +72,8 @@ export class CircuitBreaker {
       status = {
         consecutiveFailures: 0,
         trippedUntil: null,
-        lastFailureAt: null
+        lastFailureAt: null,
+        trippedSince: null
       };
       this.healthMap.set(key, status);
     }
@@ -85,8 +91,10 @@ export class CircuitBreaker {
     const status = this.getStatus(endpoint);
     if (status.trippedUntil === null) return true;
     if (now >= status.trippedUntil) {
-      // Cooldown window elapsed: probationary recovery.
+      // Cooldown window elapsed: probationary recovery. Clearing trippedSince
+      // gives any subsequent trip a fresh extension ceiling.
       status.trippedUntil = null;
+      status.trippedSince = null;
       return true;
     }
     return false;
@@ -115,10 +123,28 @@ export class CircuitBreaker {
     const cooldown = Math.max(0, cooldownMs);
 
     if (status.trippedUntil !== null && now < status.trippedUntil) {
-      // Failed again during cooldown: the window may extend from this
-      // failure but can never shrink below the current promise (a provider
-      // hint's remaining tail wins over a shorter default cooldown).
-      status.trippedUntil = Math.max(status.trippedUntil, now + cooldown);
+      // Failed again during cooldown. The window may extend from this failure
+      // but can never shrink below the current promise (a provider hint's
+      // remaining tail wins over a shorter default cooldown).
+      //
+      // It is CAPPED, though: anchoring unconditionally on `now + cooldown`
+      // let our own probe traffic (filterHealthy's degraded fallback keeps
+      // trying a fully-tripped pool) push the window out by one cooldown per
+      // failure, so the endpoint never reached probation. The ceiling is one
+      // cooldown past the *original* trip, which still honours a longer
+      // provider hint while guaranteeing eventual recovery.
+      // Two invariants, both required:
+      //   1. Never shrink below the current promise - a shorter cooldown
+      //      arriving late must not cut a longer committed window short.
+      //   2. Never extend past a bounded horizon from THIS trip's start, or
+      //      our own degraded-pool probe traffic re-anchors the window on
+      //      every failure and the endpoint never reaches probation.
+      // Capping the extension (not the promise) satisfies both: an existing
+      // promise stands, but nothing can push it further once the ceiling is
+      // reached, so it expires and the endpoint is probed again.
+      const tripStart = status.trippedSince ?? status.trippedUntil;
+      const ceiling = tripStart + cooldown * 2;
+      status.trippedUntil = Math.max(status.trippedUntil, Math.min(now + cooldown, ceiling));
       return true;
     }
 
@@ -132,6 +158,7 @@ export class CircuitBreaker {
       status.recentTrips = trips;
       const multiplier = trips.length >= FLAP_TRIP_THRESHOLD ? FLAP_COOLDOWN_MULTIPLIER : 1;
       status.trippedUntil = now + cooldown * multiplier;
+      status.trippedSince = now;
       return true;
     }
     return false;
@@ -144,7 +171,91 @@ export class CircuitBreaker {
     if (status) {
       status.consecutiveFailures = 0;
       status.trippedUntil = null;
+      status.trippedSince = null;
       status.recentTrips = []; // a clean probationary success ends any flapping episode
+    }
+  }
+
+  /**
+   * Account-level trip: when a provider hits an account-wide limit (QUOTA, 429,
+   * INVALID_CREDENTIAL), trip all endpoints belonging to that provider simultaneously.
+   *
+   * @returns array of endpoints that were tripped.
+   */
+  public recordAccountFailure(
+    provider: string,
+    allEndpoints: Endpoint[],
+    cooldownMs: number = DEFAULT_COOLDOWN_MS,
+    now: number = Date.now()
+  ): Endpoint[] {
+    const matching = allEndpoints.filter((e) => e.provider === provider);
+    for (const ep of matching) {
+      this.recordFailure(ep, 1, cooldownMs, now);
+    }
+    return matching;
+  }
+
+  /**
+   * Manually reset an endpoint or an entire provider from quarantine.
+   * Restores health immediately, clearing failure streaks and flapping records.
+   */
+  public resetEndpoint(provider: string, model?: string): void {
+    if (model) {
+      this.recordSuccess({ provider, model });
+    } else {
+      const prefix = `${provider}::`;
+      for (const [key, status] of this.healthMap.entries()) {
+        if (key.startsWith(prefix)) {
+          status.consecutiveFailures = 0;
+          status.trippedUntil = null;
+          status.trippedSince = null;
+          status.recentTrips = [];
+        }
+      }
+    }
+  }
+
+  /** Get a snapshot of all currently quarantined endpoint keys and their expiry timestamps. */
+  public getQuarantines(now: number = Date.now()): Record<string, number> {
+    const result: Record<string, number> = {};
+    for (const [key, status] of this.healthMap.entries()) {
+      if (status.trippedUntil !== null && now < status.trippedUntil) {
+        result[key] = status.trippedUntil;
+      }
+    }
+    return result;
+  }
+
+  /** Hydrate quarantines from persisted config (e.g. across process restarts). */
+  public applyQuarantines(quarantines: Record<string, number> | undefined, now: number = Date.now()): void {
+    if (!quarantines || typeof quarantines !== 'object') return;
+    for (const [key, status] of this.healthMap.entries()) {
+      if (status.trippedUntil !== null && (!quarantines[key] || quarantines[key] <= now)) {
+        status.trippedUntil = null;
+        status.trippedSince = null;
+        status.consecutiveFailures = 0;
+      }
+    }
+    for (const [key, trippedUntil] of Object.entries(quarantines)) {
+      if (typeof trippedUntil === 'number' && trippedUntil > now) {
+        let status = this.healthMap.get(key);
+        if (!status) {
+          status = {
+            consecutiveFailures: DEFAULT_MAX_FAILURES,
+            trippedUntil,
+            lastFailureAt: now,
+            trippedSince: now
+          };
+          this.healthMap.set(key, status);
+        } else {
+          // Adopt the snapshot verbatim: applyQuarantines is the authoritative
+          // "here is the current state" call, so a shorter window must win.
+          // (Extend-only semantics live in recordFailure, where a failing probe
+          // during cooldown may lengthen but never shrink the promise.)
+          status.trippedUntil = trippedUntil;
+          status.consecutiveFailures = Math.max(status.consecutiveFailures, DEFAULT_MAX_FAILURES);
+        }
+      }
     }
   }
 
@@ -165,6 +276,24 @@ export class CircuitBreaker {
   public clear(): void {
     this.healthMap.clear();
   }
+}
+
+/**
+ * Compute cooldown duration (ms) aligned to the top of the next clock hour (:00)
+ * plus a grace period (default 60s), ensuring a minimum cooldown window (default 5m).
+ */
+export function computeHourlyAlignedCooldown(
+  now: number = Date.now(),
+  graceMs: number = 60_000,
+  minMs: number = 5 * 60_000
+): number {
+  const hourMs = 60 * 60_000;
+  const currentHourStart = Math.floor(now / hourMs) * hourMs;
+  let target = currentHourStart + hourMs + graceMs;
+  if (target - now < minMs) {
+    target += hourMs;
+  }
+  return Math.max(minMs, target - now);
 }
 
 /** Shared breaker instance used by the plugin runtime. */
