@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { apply } from '../src/index.js';
 import { setConfigForTest, resetConfigForTest, disposeWatcher, getCachedFallbackChain } from '../src/config.js';
 import { defaultCircuitBreaker } from '../src/health.js';
+import { pickWeighted } from '../src/balancer.js';
 import { getRecentEvents, resetTelemetry } from '../src/telemetry.js';
 import { resetSettingsForTest } from '../src/settings.js';
 import { MockCordisContext, createMockAgent } from './mocks/cordis.js';
@@ -16,7 +17,7 @@ import { MockCordisContext, createMockAgent } from './mocks/cordis.js';
  * (tier/identity resolution of the committed target).
  *
  * CONFIRMED BUGS ARE NOT FIXED HERE (concurrent work owns src/index.ts): the
- * failing tests below carry a '// BUG:' comment describing the defect and are
+ * failing tests carry a '// BUG:' comment describing the defect and are
  * intentionally RED. Everything else is a regression pin for verified-correct
  * behavior.
  *
@@ -205,7 +206,6 @@ describe('failover walk: adversarial bug hunt', () => {
     expect(await fail(sub, { code: 'SERVER' })).toBe('host');
     expect(failoverCount()).toBe(2);
   });
-
   // ---------------------------------------------------------------------------
   // ROUND 4 - the exhaustedAgents marker is scoped by (turn, step).
   // ---------------------------------------------------------------------------
@@ -226,12 +226,6 @@ describe('failover walk: adversarial bug hunt', () => {
     // The SAME incident identified by a value-equal (turn, step) must keep
     // deferring. Here the host hands the incident identifier over as a fresh
     // wrapper object rather than the identical primitive.
-    // BUG: exhaustedAgents stores turn/step as `unknown` and compares them with
-    // === (src/index.ts:326 and :382), so an incident whose turn/step arrives as
-    // a fresh value-equal object is misread as a NEW incident: the spent walk
-    // restarts and the retry is rewritten onto the next endpoint, re-entering
-    // the "ping-pong a fully dead pool forever" loop the marker exists to stop.
-    // (A fresh PRIMITIVE with the same value is fine - === matches it.)
     const decision = await fail(sub, { code: 'SERVER' }, { valueOf: () => 1 }, { valueOf: () => 1 });
     expect(decision).toBe('host');
     expect(failoverCount()).toBe(spent);
@@ -434,13 +428,8 @@ describe('failover walk: adversarial bug hunt', () => {
     const seed = { ...ep('p1') };
     const after = await ctx.emit('agent/request', { agent: sub }, () => seed);
 
-    // BUG: the identity lookup is guarded by '?? tierList[current.index]'
-    // (src/index.ts:654-659), so a vanished target whose index still exists
-    // silently relocates the retry
-    // onto a different (here: tripped) endpoint, contradicting the in-code
-    // contract "a vanished target passes through untouched rather than
-    // silently relocating onto a neighbour". The index fallback must only be
-    // used while the list still matches the committed plan.
+    // The retry must pass through untouched: a vanished target never relocates
+    // onto whatever now holds its index.
     expect(after).toBe(seed);
     expect((after as Ep).provider).toBe('p1');
   });
@@ -460,15 +449,9 @@ describe('failover walk: adversarial bug hunt', () => {
     const seed = { ...ep('p1') };
     const after = await ctx.emit('agent/request', { agent: sub }, () => seed);
 
-    // BUG (same root cause as ROUND 11a, rescue tier): the vanished r1::m1
-    // resolves through tierList[0] (src/index.ts:659) to the new chain entry r2.
+    // The vanished r1::m1 must not resolve through tierList[0] to r2.
     expect(after).toBe(seed);
   });
-
-  // ---------------------------------------------------------------------------
-  // ROUND 12 - the exhaustion marker re-arms on a NEW turn/step (the
-  // complement of ROUND 4): the walk restarts instead of deferring forever.
-  // ---------------------------------------------------------------------------
 
   it('ROUND 12: a new turn re-arms a walk that gave up on the previous turn', async () => {
     setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
@@ -481,16 +464,10 @@ describe('failover walk: adversarial bug hunt', () => {
     expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host'); // walk spent at (1,1)
     expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host'); // still deferring
 
-    // New turn: the incident is over, so the walk must re-arm and move on
-    // from the committed endpoint rather than stay permanently exhausted.
+    // New turn: the incident is over, so the walk must re-arm.
     expect(await fail(sub, { code: 'SERVER' }, 2, 1)).toEqual({ kind: 'retry' });
     expect(((await request(sub)) as Ep).provider).toBe('p1');
   });
-
-  // ---------------------------------------------------------------------------
-  // ROUND 13 - the payload-derived current endpoint path (a subagent failure
-  // whose request was never attributed to activeEndpoints).
-  // ---------------------------------------------------------------------------
 
   it('ROUND 13: a failure carrying provider/model on the payload still walks the pool', async () => {
     setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
@@ -529,3 +506,605 @@ describe('failover walk: adversarial bug hunt', () => {
     expect(after).toBe(seed);
   });
 });
+
+/**
+ * ROUND 2: deeper adversarial probes on the marker helper, the identity-only
+ * target resolution, and the pool/fallback tier composition.
+ */
+describe('failover walk: round-2 marker + tier composition', () => {
+  let ctx: MockCordisContext;
+
+  beforeEach(() => {
+    ctx = new MockCordisContext();
+    resetTelemetry();
+    resetSettingsForTest();
+    defaultCircuitBreaker.clear();
+  });
+
+  afterEach(() => {
+    ctx.dispose();
+    disposeWatcher();
+    setConfigForTest(null);
+    resetConfigForTest('unused-failover-walk-r2.yaml');
+    defaultCircuitBreaker.clear();
+    resetTelemetry();
+    resetSettingsForTest();
+  });
+
+  const request = (agent: any, seed: Ep = ep('p1')) =>
+    ctx.emit('agent/request', { agent }, () => ({ ...seed }));
+
+  const fail = (agent: any, failure: Record<string, unknown>, turn: unknown = 1, step: unknown = 1) =>
+    ctx.emit('agent/request-error', { agent, failure, turn, step }, () => 'host');
+
+  const failoverCount = () => getRecentEvents().filter((e) => e.type === 'failover').length;
+
+  it('R2-01 (verified correct): pool mode + chain leaves the chain untouched while a healthy primary exists', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+    expect(getCachedFallbackChain().map((e) => e.provider)).toEqual(['r1']);
+
+    const sub = createMockAgent('r2-01', 'subagent');
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+  });
+
+  it('R2-02 (verified correct): pool mode + chain uses the chain as the documented degradation tier', async () => {
+    setConfigForTest(poolCfg([ep('p1')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-02', 'subagent');
+    await request(sub);
+    const decision = await fail(sub, { code: 'SERVER' });
+    expect(decision).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('r1');
+  });
+
+  it("R2-03 (verified correct): a string '1' marker matches a number 1 marker", async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-03', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, 1, 1);
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host');
+
+    expect(await fail(sub, { code: 'SERVER' }, '1', 1)).toBe('host');
+    expect(failoverCount()).toBe(1);
+  });
+
+  it('R2-04 (verified correct): boolean true matches string true but not the number 1', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-04', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, 1, true);
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' }, 1, true)).toBe('host');
+
+    expect(await fail(sub, { code: 'SERVER' }, 1, 'true')).toBe('host');
+    expect(failoverCount()).toBe(1);
+
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toEqual({ kind: 'retry' });
+  });
+
+  it('R2-05 (verified correct): two distinct value-equal wrappers are the same incident', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-05', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, { valueOf: () => 7 }, 1);
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' }, { valueOf: () => 7 }, 1)).toBe('host');
+
+    expect(await fail(sub, { code: 'SERVER' }, { valueOf: () => 7 }, 1)).toBe('host');
+    expect(failoverCount()).toBe(1);
+  });
+
+  it('R2-06 (verified correct): the retry budget survives a re-wrapped value-equal turn', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: 2 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-06', 'subagent');
+    await request(sub);
+
+    const wrapped = () => ({ valueOf: () => 1 });
+    expect(await fail(sub, { code: 'SERVER' }, wrapped(), 1)).toEqual({ kind: 'retry' });
+    expect(await fail(sub, { code: 'SERVER' }, wrapped(), 1)).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(0);
+    expect(await fail(sub, { code: 'SERVER' }, wrapped(), 1)).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(1);
+  });
+
+  it('R2-07 (verified correct): the retry budget survives a string-vs-number turn', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: 1 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-07', 'subagent');
+    await request(sub);
+
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(0);
+    expect(await fail(sub, { code: 'SERVER' }, '1', 1)).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(1);
+  });
+
+  it('R2-08 (verified correct): give-up clears the budget and a new turn starts fresh', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: 1 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-08', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, 1, 1);
+    await fail(sub, { code: 'SERVER' }, 1, 1);
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, 1, 1);
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host');
+    expect(failoverCount()).toBe(1);
+
+    expect(await fail(sub, { code: 'SERVER' }, 2, 1)).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(1);
+  });
+
+  it('R2-09 (verified correct): a hint re-arms the same incident through a re-wrapped turn', async () => {
+    setConfigForTest(fallbackCfg([ep('p1')], [ep('r1')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-09', 'subagent');
+    const wrapped = () => ({ valueOf: () => 3 });
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, wrapped(), 1);
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, wrapped(), 1);
+    expect(await fail(sub, { code: 'SERVER' }, wrapped(), 1)).toBe('host');
+
+    const decision = await fail(sub, { code: 'RATE_LIMIT', providerRetryAfterMs: 60_000 }, wrapped(), 1);
+    expect(decision).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p1');
+  });
+
+  it('R2-10 (verified correct): a parked committed target must not relocate the retry', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2'), ep('p3', 'm3')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-10', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' });
+    await request(sub);
+    await fail(sub, { code: 'SERVER' });
+
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2'), ep('p4', 'm4')]) as never);
+    defaultCircuitBreaker.recordFailure(ep('p4', 'm4'), 1, 3_600_000);
+
+    const seed = { ...ep('p1') };
+    const after = await ctx.emit('agent/request', { agent: sub }, () => seed);
+    expect(after).toBe(seed);
+  });
+
+  it('R2-11 (verified correct): a committed target resolves by identity', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2'), ep('p3', 'm3')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-11', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' });
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+  });
+
+  it('R2-12 (verified correct): a second commit overwrites the first cleanly', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2'), ep('p3', 'm3')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-12', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' });
+    await request(sub);
+    await fail(sub, { code: 'SERVER' });
+
+    expect(((await request(sub)) as Ep).provider).toBe('p3');
+    expect(await fail(sub, { code: 'SERVER' })).toBe('host');
+  });
+
+  it('R2-13 (verified correct): maxRetries 0 fails over on the first failure', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: 0 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-13', 'subagent');
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(1);
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+  });
+
+  it('R2-14 (verified correct): undefined maxRetries uses the default budget', async () => {
+    const cfg = poolCfg([ep('p1'), ep('p2', 'm2')]);
+    delete (cfg as Record<string, unknown>).maxRetries;
+    setConfigForTest(cfg as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-14', 'subagent');
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(0);
+  });
+
+  it('R2-15 (verified correct): a negative maxRetries falls back to the default budget', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: -5 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-15', 'subagent');
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(0);
+  });
+
+  it('R2-16 (verified correct): a hint on a different endpoint does not derail the walk', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: 5 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r2-16', 'subagent');
+    await request(sub);
+
+    const decision = await ctx.emit(
+      'agent/request-error',
+      {
+        agent: sub,
+        provider: 'p9',
+        model: 'm9',
+        failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 60_000 },
+        turn: 1,
+        step: 1
+      },
+      () => 'host'
+    );
+    expect(decision).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+  });
+
+  it('R2-17 (verified correct): the degraded walk wraps from the last endpoint', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const long = 3_600_000;
+    defaultCircuitBreaker.recordFailure(ep('p1'), 1, long);
+    defaultCircuitBreaker.recordFailure(ep('p2', 'm2'), 1, long);
+
+    const sub = createMockAgent('r2-17', 'subagent');
+    await request(sub, ep('p2', 'm2'));
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p1');
+  });
+
+  it('R2-18 (verified correct): root failures do not pollute the marker/budget maps', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxRetries: 1 }) as never);
+    apply(ctx);
+
+    const id = 'shared-id-r2-18';
+    const root = createMockAgent(id, 'user');
+    await request(root);
+    expect(await fail(root, { code: 'SERVER' })).toBe('host');
+    expect(await fail(root, { code: 'SERVER' })).toBe('host');
+    expect(failoverCount()).toBe(0);
+
+    const sub = createMockAgent(id, 'subagent');
+    defaultCircuitBreaker.clear();
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(0);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(failoverCount()).toBe(1);
+  });
+
+  it('R2-19 (verified correct): pool mode + chain degrades to the chain when every primary is tripped', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    defaultCircuitBreaker.recordFailure(ep('p2', 'm2'), 1, 3_600_000);
+
+    const sub = createMockAgent('r2-19', 'subagent');
+    await request(sub);
+    const decision = await fail(sub, { code: 'SERVER' });
+    expect(decision).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('r1');
+  });
+
+  it('R2-20 (verified correct): pool-mode start routing reaches a healthy chain endpoint', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    const long = 3_600_000;
+    defaultCircuitBreaker.recordFailure(ep('p1'), 1, long);
+    defaultCircuitBreaker.recordFailure(ep('p2', 'm2'), 1, long);
+
+    const res: any = await ctx.subagents.start('r2-20', {});
+    expect(res.request?.agentOptions?.provider).toBe('r1');
+  });
+});
+
+
+/**
+ * ROUND 3: cross-turn walk state + verification of the landed pool-mode tier fix.
+ *
+ * The reviewer's reproduction (R3-01) fully spends turn 1's walk, so the last
+ * failure reaches the give-up path, which deletes pendingFailovers -- and turn 2
+ * re-arms correctly. That path is VERIFIED CORRECT.
+ *
+ * R3-02/03/04 probe the SAME cross-turn question with turn 1 ending after only a
+ * PARTIAL walk (no give-up). R3-05 clears the circuit breaker between turns so
+ * only the walk budget can explain the outcome.
+ */
+describe('failover walk: round-3 cross-turn walk state', () => {
+  let ctx: MockCordisContext;
+
+  beforeEach(() => {
+    ctx = new MockCordisContext();
+    resetTelemetry();
+    resetSettingsForTest();
+    defaultCircuitBreaker.clear();
+  });
+
+  afterEach(() => {
+    ctx.dispose();
+    disposeWatcher();
+    setConfigForTest(null);
+    resetConfigForTest('unused-failover-walk-r3.yaml');
+    defaultCircuitBreaker.clear();
+    resetTelemetry();
+    resetSettingsForTest();
+  });
+
+  const request = (agent: any, seed: Ep = ep('p1')) =>
+    ctx.emit('agent/request', { agent }, () => ({ ...seed }));
+
+  const fail = (agent: any, failure: Record<string, unknown>, turn: unknown = 1, step: unknown = 1) =>
+    ctx.emit('agent/request-error', { agent, failure, turn, step }, () => 'host');
+
+  const failoverCount = () => getRecentEvents().filter((e) => e.type === 'failover').length;
+  const turnStop = (agent: any) => ctx.emit('agent/turn-stopping', { agent }, () => null);
+
+  it('R3-01 (verified correct): a FULLY spent walk re-arms on the next turn', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r3-01', 'subagent');
+    await request(sub, ep('p1'));
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toEqual({ kind: 'retry' }); // p1 -> p2
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host');              // spent -> give up + delete
+    await turnStop(sub);
+
+    await request(sub, ep('p1'));
+    expect(await fail(sub, { code: 'SERVER' }, 2, 1)).toEqual({ kind: 'retry' });
+  });
+
+  it('R3-02: a PARTIAL turn-1 walk must not block turn 2 (breaker cleared control)', async () => {
+    // Control isolating the walk budget from breaker exhaustion:
+    //   - maxFailures 3, so ONE failure does not trip either endpoint;
+    //   - the breaker is wiped between turns, so BOTH endpoints are healthy
+    //     going into turn 2.
+    // Only the walk budget can therefore explain the outcome.
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { maxFailures: 3 }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r3-02', 'subagent');
+
+    await request(sub, ep('p1'));
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+    await turnStop(sub);
+
+    defaultCircuitBreaker.clear();
+    expect(defaultCircuitBreaker.isHealthy(ep('p1'))).toBe(true);
+    expect(defaultCircuitBreaker.isHealthy(ep('p2', 'm2'))).toBe(true);
+
+    await request(sub, ep('p2', 'm2'));
+    // Turn 2 is a fresh incident: turn differs, the retry budget is
+    // incident-scoped and fresh, no exhaustion marker was ever set, and BOTH
+    // endpoints are healthy. The walk must be able to move again.
+    //
+    // BUG: pendingFailovers (src/index.ts:93) is keyed by agent id ONLY and
+    // carries no turn/step, unlike retryIncidents and exhaustedAgents which are
+    // both incident-scoped. It is cleared only on give-up (src/index.ts:518) or
+    // disposal, so a PARTIAL walk leaks its spent count into every later turn.
+    // The exhaustion check 'current.count >= endpoints.length - 1'
+    // (src/index.ts:502) then sees turn 1's count=1 against a 2-endpoint pool
+    // and refuses the failover on turn 2 -- while a healthy endpoint (p1) sits
+    // unused. Measured pattern over 6 turns with the breaker cleared each turn:
+    //   t1 retry->p2, t2 GIVEUP, t3 retry->p2, t4 GIVEUP, t5 retry->p2, t6 GIVEUP
+    // i.e. a long-lived subagent loses failover on half of its turns.
+    //
+    // Suggested fix: scope pendingFailovers to the incident like its siblings
+    // (record turn/step on the commit at src/index.ts:602 and treat a different
+    // turn/step as a fresh walk), or clear it at the turn boundary.
+    expect(await fail(sub, { code: 'SERVER' }, 2, 1)).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p1');
+  });
+
+  // -------------------------------------------------------------------------
+  // Verifying the landed pool-mode chain fix (candidate list + start routing).
+  // -------------------------------------------------------------------------
+
+  it('R3-03 (verified correct): pool+chain with healthy primaries never routes a start to the chain', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    const seen: (string | undefined)[] = [];
+    for (let i = 0; i < 6; i++) {
+      const res: any = await ctx.subagents.start('r3-03-' + i, {});
+      seen.push(res.request?.agentOptions?.provider);
+    }
+    expect(seen).not.toContain('r1');
+    expect(new Set(seen)).toEqual(new Set(['p1', 'p2']));
+  });
+
+  it('R3-04 (verified correct): with no chain configured behavior is unchanged', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2'), ep('p3', 'm3')]) as never);
+    apply(ctx);
+
+    const seen: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const res: any = await ctx.subagents.start('r3-04-' + i, {});
+      seen.push(res.request?.agentOptions?.provider);
+    }
+    expect(seen).toEqual(['p1', 'p2', 'p3']);
+
+    const sub = createMockAgent('r3-04-walk', 'subagent');
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toBe('host');
+    expect(failoverCount()).toBe(2);
+  });
+
+  it('R3-05 (verified correct): the anyPrimaryHealthy probe leaves an un-lapsed trip intact', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    // p1 lapses immediately (zero-length cooldown); p2 is tripped for an hour.
+    defaultCircuitBreaker.recordFailure(ep('p1'), 1, 0);
+    defaultCircuitBreaker.recordFailure(ep('p2', 'm2'), 1, 3_600_000);
+
+    const res: any = await ctx.subagents.start('r3-05', {});
+    expect(res.request?.agentOptions?.provider).toBe('p1');
+    // The un-lapsed trip on p2 survived the probe untouched.
+    expect(defaultCircuitBreaker.getStatus(ep('p2', 'm2')).trippedUntil).toBeGreaterThan(Date.now());
+  });
+
+  it('R3-06 (verified correct): a key duplicated across primary+chain does not self-failover', async () => {
+    setConfigForTest(poolCfg([ep('dup')], { fallback: [ep('dup')] }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r3-06', 'subagent');
+    await request(sub, ep('dup'));
+    expect(await fail(sub, { code: 'SERVER' })).toBe('host');
+    expect(failoverCount()).toBe(0);
+  });
+
+  it('R3-07 (verified correct): healthy rescue outranks a degraded primary; degraded primary outranks degraded rescue', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    const long = 3_600_000;
+    defaultCircuitBreaker.recordFailure(ep('p2', 'm2'), 1, long); // p2 degraded
+
+    const sub = createMockAgent('r3-07', 'subagent');
+    await request(sub, ep('p1'));
+    // p1 trips; p2 is degraded but r1 is HEALTHY -> healthy rescue wins.
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('r1');
+
+    // Now degrade the rescuer too: the degraded-primary walk must come first.
+    defaultCircuitBreaker.recordFailure(ep('r1'), 1, long);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' });
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+  });
+
+  it('R3-08 (verified correct): round-robin still distributes evenly with a chain configured', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const res: any = await ctx.subagents.start('r3-08-' + i, {});
+      seen.push(res.request?.agentOptions?.provider);
+    }
+    expect(seen).toEqual(['p1', 'p2', 'p1', 'p2']);
+  });
+
+  it('R3-09 (verified correct): a single healthy primary keeps the chain untouched', async () => {
+    setConfigForTest(poolCfg([ep('p1')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    for (let i = 0; i < 3; i++) {
+      const res: any = await ctx.subagents.start('r3-09-' + i, {});
+      expect(res.request?.agentOptions?.provider).toBe('p1');
+    }
+  });
+
+  it('R3-10 (verified correct): pool+chain affords N-1 failovers over the COMBINED list', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [ep('r1')] }) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r3-10', 'subagent');
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' }); // -> p2
+    expect(((await request(sub)) as Ep).provider).toBe('p2');
+    expect(await fail(sub, { code: 'SERVER' })).toEqual({ kind: 'retry' }); // -> r1
+    expect(((await request(sub)) as Ep).provider).toBe('r1');
+    expect(await fail(sub, { code: 'SERVER' })).toBe('host');
+    expect(failoverCount()).toBe(2);
+  });
+
+  it('R3-11 (verified correct): the cap still passes an over-cap start through unrouted with a chain present', async () => {
+    setConfigForTest(poolCfg([ep('p1')], { fallback: [ep('r1')], totalSubagents: 1 }) as never);
+    apply(ctx);
+
+    const live = createMockAgent('r3-11-live', 'subagent');
+    await request(live, ep('p1'));
+
+    const over: any = await ctx.subagents.start('r3-11-over', {});
+    expect(over.request?.agentOptions).toBeUndefined();
+  });
+
+  it('R3-12 (verified correct): dispose clears walk state so a re-apply starts fresh', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const id = 'r3-12';
+    const sub = createMockAgent(id, 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }); // p1 -> p2, count 1
+    await request(sub);
+
+    ctx.dispose();
+    const ctx2 = new MockCordisContext();
+    apply(ctx2);
+    try {
+      // Bind the emitters to ctx2: the helpers above close over ctx.
+      const sub2 = createMockAgent(id, 'subagent');
+      await ctx2.emit('agent/request', { agent: sub2 }, () => ({ ...ep('p1') }));
+      const decision = await ctx2.emit('agent/request-error', { agent: sub2, failure: { code: 'SERVER' }, turn: 1, step: 1 }, () => 'host');
+      expect(decision).toEqual({ kind: 'retry' });
+      const after = (await ctx2.emit('agent/request', { agent: sub2 }, () => ({ ...ep('p1') }))) as Ep;
+      expect(after.provider).toBe('p2');
+    } finally {
+      ctx2.dispose();
+    }
+  });
+
+  it('R3-13 (verified correct): the exhaustion marker does not swallow a different step', async () => {
+    setConfigForTest(poolCfg([ep('p1'), ep('p2', 'm2')]) as never);
+    apply(ctx);
+
+    const sub = createMockAgent('r3-13', 'subagent');
+    await request(sub);
+    await fail(sub, { code: 'SERVER' }, 1, 1); // p1 -> p2
+    await request(sub);
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host'); // (1,1) spent
+    expect(await fail(sub, { code: 'SERVER' }, 1, 1)).toBe('host'); // still (1,1)
+    // A DIFFERENT step is a different incident: the walk must re-arm.
+    expect(await fail(sub, { code: 'SERVER' }, 1, 2)).toEqual({ kind: 'retry' });
+  });
+
+  it('R3-14 (verified correct): a fully parked chain behaves exactly like no chain', async () => {
+    setConfigForTest(
+      poolCfg([ep('p1'), ep('p2', 'm2')], { fallback: [{ provider: 'r1', model: 'm1', enabled: false }] }) as never
+    );
+    apply(ctx);
+    expect(getCachedFallbackChain()).toEqual([]);
+
+    const seen: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const res: any = await ctx.subagents.start('r3-14-' + i, {});
+      seen.push(res.request?.agentOptions?.provider);
+    }
+    expect(seen).toEqual(['p1', 'p2']);
+  });
+});
+
+
