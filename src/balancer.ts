@@ -13,7 +13,24 @@ import { CircuitBreaker, defaultCircuitBreaker } from './health.js';
 export function pickWeighted(endpoints: Endpoint[]): Endpoint | null {
   if (!endpoints || endpoints.length === 0) return null;
 
-  const weights = endpoints.map((e) => Math.max(1, e.weight || 1));
+  // Every weight is reduced to a usable finite number >= 1 (the documented
+  // minimum, see the docstring above). Two separate hazards meet on this line:
+  //
+  //  - Non-finite: an Infinity weight made scale Infinity, every scaled weight
+  //    NaN or 0, totalWeight NaN, the loop guard unreachable, and every pick
+  //    fell through to the last bucket. Not config-reachable (schemastery
+  //    coerces Infinity to null) but pickWeighted is exported, so reduce it
+  //    here anyway.
+  //  - Sub-1 positive: 0.5 or 1e-300 is finite and > 0, so a bare "is it
+  //    positive" test let it through and a tiny weight starved its endpoint to
+  //    exactly 0 traffic — the precise outcome the min-1 clamp exists to
+  //    prevent, and config-reachable (config.ts accepts any finite weight > 0).
+  //
+  // So: reject non-finite first, THEN apply the floor.
+  const weights = endpoints.map((e) => {
+    const w = e.weight;
+    return typeof w === 'number' && Number.isFinite(w) ? Math.max(1, w) : 1;
+  });
 
   // Scale-normalize before summing. Selection probabilities are ratios, so
   // dividing every weight by the largest one is behavior-preserving — but it
@@ -22,7 +39,9 @@ export function pickWeighted(endpoints: Endpoint[]): Endpoint | null {
   // randomVal Infinity, the loop guard never true, and every pick fall through
   // to the last endpoint (total starvation of the others). Such weights are
   // accepted by the config schema, so this was reachable in practice.
-  const scale = Math.max(...weights);
+  // reduce, not spread: Math.max(...weights) hits V8's argument-count ceiling
+  // (RangeError) at roughly 125k entries, which the value clamp cannot bound.
+  const scale = weights.reduce((max, w) => (w > max ? w : max), 0);
   const scaled = weights.map((w) => w / scale);
   const totalWeight = scaled.reduce((sum, w) => sum + w, 0);
   let randomVal = Math.random() * totalWeight;
