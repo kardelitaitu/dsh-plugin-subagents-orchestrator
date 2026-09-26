@@ -101,14 +101,25 @@ export async function storedBaseURL(settings: RemoteSettingsFace | null | undefi
     return undefined;
   }
   if (!described.ok) return undefined;
-  const namespace = (described.value?.namespaces ?? []).find((ns) => ns?.ns === DISCOVERY_SETTINGS_NS);
+  // The host is a trust boundary: describe() can answer with any shape, and
+  // this function's contract is "undefined, never throw". `?? []` only guards
+  // null/undefined, so a non-array `namespaces` (or a non-object `value`)
+  // reached .find() and threw straight through runEndpointTest's documented
+  // never-throw guarantee and into the panel's click handler.
+  const describedValue = described.value as { namespaces?: unknown } | undefined;
+  if (!describedValue || typeof describedValue !== 'object') return undefined;
+  const namespaces = describedValue.namespaces;
+  if (!Array.isArray(namespaces)) return undefined;
+  const namespace = namespaces.find((ns) => ns?.ns === DISCOVERY_SETTINGS_NS);
   const value = namespace?.value as { providers?: Record<string, { baseURL?: unknown }> | unknown } | undefined;
   const providers = value?.providers;
   if (!providers || typeof providers !== 'object') return undefined;
   const record = (providers as Record<string, { baseURL?: unknown }>)[provider];
   if (!record || typeof record !== 'object') return undefined;
   const baseURL = (record as { baseURL?: unknown }).baseURL;
-  return typeof baseURL === 'string' && baseURL.trim().length > 0 ? baseURL : undefined;
+  // Trim here, not just at the caller: runEndpointTest passes a stored value
+  // through verbatim, so surrounding whitespace would reach the host URL.
+  return typeof baseURL === 'string' && baseURL.trim().length > 0 ? baseURL.trim() : undefined;
 }
 
 /**
@@ -180,13 +191,18 @@ export async function runEndpointTest(
   input: TestConnectionInput,
   signal?: AbortSignal
 ): Promise<TestConnectionOutcome> {
-  const llm = faces.llm;
+  const llm = faces?.llm;
   if (!llm || typeof llm.discoverModels !== 'function') {
     return { status: 'unavailable', message: 'This DSH build does not expose the remote.llm probe channel to plugin panels.' };
   }
 
-  let baseURL = input.baseURL?.trim();
-  if (!baseURL) baseURL = await storedBaseURL(faces.settings, input.provider);
+  // The input is a trust boundary as well: a null input or a non-string
+  // baseURL used to throw ("Cannot read properties of null", "baseURL?.trim is
+  // not a function") out of the documented never-throw contract. Only a real
+  // string is usable as a probe target.
+  const request = (input ?? {}) as TestConnectionInput;
+  let baseURL = typeof request.baseURL === 'string' ? request.baseURL.trim() : undefined;
+  if (!baseURL) baseURL = await storedBaseURL(faces?.settings, request.provider);
   if (!baseURL) {
     return { status: 'fail', message: 'No baseURL to probe: enter one, or add this provider to the Models settings first.' };
   }
@@ -197,26 +213,33 @@ export async function runEndpointTest(
     const response = await llm.discoverModels(
       DISCOVERY_SETTINGS_NS,
       {
-        provider: input.provider,
+        provider: request.provider,
         baseURL,
-        ...(input.apiKey ? { apiKey: input.apiKey } : {})
+        ...(request.apiKey ? { apiKey: request.apiKey } : {})
       },
       composed.signal
     );
     const latencyMs = Date.now() - startedAt;
+    // The remote face is a trust boundary: a host that answers with a
+    // non-envelope (null/undefined/a primitive) would otherwise surface a raw
+    // "Cannot read properties of null" to the panel. Report it as a probe
+    // failure with actionable text instead.
+    if (!response || typeof response !== 'object') {
+      return { status: 'fail', message: 'The probe channel returned no result. Try again, or check that the remote.llm channel is available.', latencyMs };
+    }
     if (!response.ok) {
       return { status: 'fail', message: response.error?.message || 'The probe was refused without a message.', latencyMs };
     }
     const models = Array.isArray(response.value) ? response.value : [];
-    if (!input.model) {
+    if (!request.model) {
       return { status: 'ok', models, modelFound: null, latencyMs };
     }
-    const configured = models.find((model) => model?.id === input.model);
+    const configured = models.find((model) => model?.id === request.model);
     return {
       status: 'ok',
       models,
       modelFound: Boolean(configured),
-      ...(configured?.contextWindow !== undefined ? { modelContextWindow: configured.contextWindow } : {}),
+      ...(typeof configured?.contextWindow === 'number' ? { modelContextWindow: configured.contextWindow } : {}),
       latencyMs
     };
   } catch (error) {

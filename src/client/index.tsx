@@ -30,6 +30,9 @@ export interface ClientConfig {
   persistTelemetry?: boolean;
 }
 
+const STRATEGIES = ['round-robin', 'random', 'weighted'] as const;
+const MODES = ['pool', 'fallback'] as const;
+
 const DEFAULTS: ClientConfig = {
   enabled: true,
   strategy: 'round-robin',
@@ -465,17 +468,22 @@ export function projectConfig(value: any): ClientConfig {
   }
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : DEFAULTS.enabled,
-    strategy: value.strategy || DEFAULTS.strategy,
+    // Whitelisted, not merely truthy: an unknown strategy/mode would otherwise
+    // project straight into the typed config (no segmented button active, and
+    // re-persisted on the next Save). config.ts already rejects these values.
+    strategy: (STRATEGIES as readonly string[]).includes(value.strategy) ? value.strategy : DEFAULTS.strategy,
     failover: typeof value.failover === 'boolean' ? value.failover : DEFAULTS.failover,
-    mode: value.mode || DEFAULTS.mode,
-    endpoints: Array.isArray(value.endpoints) ? value.endpoints : [],
-    fallback: Array.isArray(value.fallback) ? value.fallback : [],
+    mode: (MODES as readonly string[]).includes(value.mode) ? value.mode : DEFAULTS.mode,
+    // Fresh arrays AND fresh row objects: the projection must not alias the raw
+    // snapshot, or a later in-place edit would write through to the host state.
+    endpoints: Array.isArray(value.endpoints) ? value.endpoints.map((row: any) => ({ ...row })) : [],
+    fallback: Array.isArray(value.fallback) ? value.fallback.map((row: any) => ({ ...row })) : [],
     cooldownMs: typeof value.cooldownMs === 'number' ? value.cooldownMs : DEFAULTS.cooldownMs,
     maxFailures: typeof value.maxFailures === 'number' ? value.maxFailures : DEFAULTS.maxFailures,
     intervalMinMs: typeof value.intervalMinMs === 'number' ? value.intervalMinMs : DEFAULTS.intervalMinMs,
     intervalMaxMs: typeof value.intervalMaxMs === 'number' ? value.intervalMaxMs : DEFAULTS.intervalMaxMs,
     alignHourly: typeof value.alignHourly === 'boolean' ? value.alignHourly : DEFAULTS.alignHourly,
-    quarantines: value.quarantines && typeof value.quarantines === 'object' ? value.quarantines : {},
+    quarantines: value.quarantines && typeof value.quarantines === 'object' ? { ...value.quarantines } : {},
     debug: typeof value.debug === 'boolean' ? value.debug : DEFAULTS.debug,
     persistTelemetry: typeof value.persistTelemetry === 'boolean' ? value.persistTelemetry : DEFAULTS.persistTelemetry
   };
@@ -526,18 +534,31 @@ export function isConfigDirty(draft: ClientConfig, current: ClientConfig): boole
 export function endpointQuarantineUntil(
   endpoint: EndpointRow,
   draftQuarantines: Record<string, number> | undefined,
-  currentQuarantines: Record<string, number> | undefined
+  currentQuarantines: Record<string, number> | undefined,
+  suppressedKeys?: ReadonlySet<string>
 ): number | undefined {
   const draft = draftQuarantines || {};
   const current = currentQuarantines || {};
-  const at =
-    draft[`${endpoint.provider}::${endpoint.model}`] ??
-    draft[`${endpoint.provider}:${endpoint.model}`] ??
-    draft[endpoint.provider] ??
-    current[`${endpoint.provider}::${endpoint.model}`] ??
-    current[`${endpoint.provider}:${endpoint.model}`] ??
-    current[endpoint.provider];
-  return typeof at === 'number' ? at : undefined;
+  const keys = [
+    `${endpoint.provider}::${endpoint.model}`,
+    `${endpoint.provider}:${endpoint.model}`,
+    endpoint.provider
+  ];
+  // A key the user just cleared is skipped in BOTH maps: the draft already
+  // dropped it, and the snapshot still carries it until the write lands, so the
+  // fall-through would otherwise re-show Tripped and the Reset would look
+  // broken for the whole RPC (and forever if the write is rejected).
+  for (const key of keys) {
+    if (suppressedKeys?.has(key)) continue;
+    const at = draft[key];
+    if (at !== undefined && at !== null) return typeof at === 'number' ? at : undefined;
+  }
+  for (const key of keys) {
+    if (suppressedKeys?.has(key)) continue;
+    const at = current[key];
+    if (at !== undefined && at !== null) return typeof at === 'number' ? at : undefined;
+  }
+  return undefined;
 }
 
 /** Whether `endpoint` is currently in cooldown. */
@@ -545,29 +566,125 @@ export function isEndpointTripped(
   endpoint: EndpointRow,
   draftQuarantines: Record<string, number> | undefined,
   currentQuarantines: Record<string, number> | undefined,
-  now: number
+  now: number,
+  suppressedKeys?: ReadonlySet<string>
 ): boolean {
-  const at = endpointQuarantineUntil(endpoint, draftQuarantines, currentQuarantines);
+  const at = endpointQuarantineUntil(endpoint, draftQuarantines, currentQuarantines, suppressedKeys);
   return typeof at === 'number' && at > now;
 }
 
-/** Draft quarantines with every key shape for (provider, model) cleared. */
+/**
+ * The subset of locally-cleared keys that are still pending.
+ *
+ * A clear is remembered WITH the snapshot value it cleared. It stays suppressed
+ * only while the snapshot still carries that exact value: once the write lands
+ * (key gone) or the host re-trips the endpoint with a newer timestamp, the key
+ * is live again and must not be hidden by a later, unrelated reset.
+ */
+export function activeClearedQuarantineKeys(
+  cleared: Map<string, number | undefined>,
+  currentQuarantines: Record<string, number> | undefined
+): Set<string> {
+  const current = currentQuarantines || {};
+  const active = new Set<string>();
+  for (const [key, clearedValue] of cleared) {
+    if (clearedValue !== undefined && current[key] === clearedValue) active.add(key);
+  }
+  return active;
+}
+
+/**
+ * The quarantine map to persist after resetting one endpoint: the snapshot's
+ * entries (freshest expiry wins), minus the target's every key shape, minus the
+ * keys this session already cleared.
+ */
+/**
+ * Drop clear-memory entries whose intent is already fulfilled.
+ *
+ * An entry is pending only while the snapshot still carries the exact value the
+ * clear removed. Once the snapshot no longer matches - the write landed, or the
+ * host re-tripped the endpoint with a different expiry - the entry MUST be
+ * removed, not merely filtered: a stale entry re-arms itself the moment the
+ * host re-trips the endpoint with a value equal to the cleared one (which
+ * alignHourly makes likely inside the same hour), and an unrelated reset would
+ * then silently clear that live quarantine.
+ */
+export function pruneClearedQuarantineKeys(
+  cleared: Map<string, number | undefined>,
+  currentQuarantines: Record<string, number> | undefined
+): Map<string, number | undefined> {
+  const current = currentQuarantines || {};
+  const next = new Map<string, number | undefined>();
+  for (const [key, clearedValue] of cleared) {
+    if (clearedValue !== undefined && current[key] === clearedValue) next.set(key, clearedValue);
+  }
+  return next;
+}
+
+/**
+ * Drop draft quarantine entries the snapshot no longer carries.
+ *
+ * The draft is never hydrated with quarantines, so a key it holds from an
+ * earlier reset would otherwise outlive a HOST-side clear (another surface, or
+ * a host API): the draft-first display lookup keeps showing Tripped forever.
+ * Only removals are reconciled - a snapshot entry is never added back, or a
+ * pending clear would be resurrected.
+ */
+export function reconcileDraftQuarantines(
+  draftQuarantines: Record<string, number> | undefined,
+  currentQuarantines: Record<string, number> | undefined
+): Record<string, number> {
+  const current = currentQuarantines || {};
+  const next: Record<string, number> = {};
+  for (const [key, value] of Object.entries(draftQuarantines || {})) {
+    if (key in current) next[key] = value;
+  }
+  return next;
+}
+
 export function quarantinesAfterReset(
   draftQuarantines: Record<string, number> | undefined,
   currentQuarantines: Record<string, number> | undefined,
   provider: string,
-  model: string
+  model: string,
+  locallyClearedKeys: readonly string[] = []
 ): Record<string, number> {
-  const next = { ...(draftQuarantines || {}) };
   // The draft is NOT hydrated with quarantines (the sync effect excludes the
-  // field), so the snapshot's entries must be merged in first: writing the
-  // draft map alone dropped every OTHER endpoint's quarantine.
-  for (const [key, value] of Object.entries(currentQuarantines || {})) {
-    if (!(key in next)) next[key] = value;
+  // field), so the snapshot's entries are merged in first - writing the draft
+  // map alone dropped every OTHER endpoint's quarantine. The snapshot is
+  // authoritative for those entries (it carries the freshest expiry), except
+  // for keys the user already reset in this session: a lagging snapshot would
+  // otherwise re-add the trip the user just cleared.
+  const cleared = new Set<string>(locallyClearedKeys);
+  const next: Record<string, number> = {};
+  for (const [key, value] of Object.entries(draftQuarantines || {})) {
+    if (!cleared.has(key)) next[key] = value;
   }
-  delete next[`${provider}::${model}`];
-  delete next[`${provider}:${model}`];
-  delete next[provider];
+  // The snapshot wins for keys both sides carry: the draft is only ever edited
+  // by removals, so the host's timestamp is the fresher one.
+  for (const [key, value] of Object.entries(currentQuarantines || {})) {
+    if (!cleared.has(key)) next[key] = value;
+  }
+  for (const key of [`${provider}::${model}`, `${provider}:${model}`, provider]) {
+    delete next[key];
+  }
+  return next;
+}
+
+/**
+ * Set one endpoint row's weight from a raw input value.
+ *
+ * Shares `normalizeWeight` with the add row so both editors enforce the same
+ * floor; the inline `Number(raw) || 1` it replaced let a typed negative or a
+ * non-finite value through.
+ */
+export function updateEndpointWeightAt(
+  endpoints: EndpointRow[],
+  index: number,
+  rawWeight: unknown
+): EndpointRow[] {
+  const next = [...endpoints];
+  if (next[index]) next[index] = { ...next[index], weight: normalizeWeight(rawWeight) };
   return next;
 }
 
@@ -585,6 +702,12 @@ export function removeEndpointAt(endpoints: EndpointRow[], index: number): Endpo
   return endpoints.filter((_, i) => i !== index);
 }
 
+/** Coerce a raw weight input to a finite number >= 1 (the UI's declared floor). */
+export function normalizeWeight(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
 /** Build a new endpoint row, or null when provider/model are blank. */
 export function buildEndpointRow(
   provider: string,
@@ -598,8 +721,8 @@ export function buildEndpointRow(
     model: model.trim(),
     ...(reasoningEffort.trim() ? { reasoningEffort: reasoningEffort.trim() } : {}),
     // The panel's weight inputs declare min=1; `Number(x) || 1` only catches
-    // 0/NaN, so a typed negative would otherwise be stored as-is.
-    weight: Math.max(1, Number(weight) || 1),
+    // 0/NaN, so a typed negative or a non-finite value would be stored as-is.
+    weight: normalizeWeight(weight),
     enabled: true
   };
 }
@@ -660,6 +783,11 @@ export function SubagentsOrchestratorSection(props: any) {
   // The projection the draft was last reconciled against, so the sync effect
   // can tell a pending user edit from a snapshot change.
   const lastSnapValue = useRef<any>(undefined);
+  // Quarantine keys this session has reset, remembered with the snapshot value
+  // they cleared. The draft is never hydrated with quarantines, so a reset has
+  // to rebuild the map from the snapshot; without this memory a LAGGING
+  // snapshot would re-add the trip the user just cleared.
+  const clearedQuarantineKeys = useRef<Map<string, number | undefined>>(new Map());
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15000);
@@ -679,6 +807,9 @@ export function SubagentsOrchestratorSection(props: any) {
   };
 
   const resetAllHealth = async () => {
+    // Everything the snapshot currently carries is being cleared, so it must
+    // stay suppressed until the write lands.
+    for (const [key, value] of Object.entries(current.quarantines || {})) clearedQuarantineKeys.current.set(key, value);
     update('quarantines', {});
     if (scope?.set) {
       try {
@@ -698,9 +829,21 @@ export function SubagentsOrchestratorSection(props: any) {
   useEffect(() => {
     if (snap?.value) {
       const nextSnap = projectConfig(snap.value);
+      // A revision bump is exactly when a Reset write lands, so this is where
+      // fulfilled clear-memory entries are forgotten.
+      clearedQuarantineKeys.current = pruneClearedQuarantineKeys(
+        clearedQuarantineKeys.current,
+        nextSnap.quarantines
+      );
       const prevSnap = lastSnapValue.current;
       lastSnapValue.current = nextSnap;
-      setDraft((prev) => mergeSnapshotIntoDraft(prev, prevSnap, nextSnap));
+      setDraft((prev) => {
+        const merged = mergeSnapshotIntoDraft(prev, prevSnap, nextSnap);
+        // Host-side clears must reach the draft: the draft-first display lookup
+        // would otherwise show a quarantined row forever after another surface
+        // cleared it. Removals only - never add a snapshot entry back.
+        return { ...merged, quarantines: reconcileDraftQuarantines(prev.quarantines, nextSnap.quarantines) };
+      });
     }
   }, [snap?.revision, ready]);
 
@@ -719,7 +862,15 @@ export function SubagentsOrchestratorSection(props: any) {
   };
 
   const resetEndpointHealth = async (provider: string, model: string) => {
-    const nextQ = quarantinesAfterReset(draft.quarantines, current.quarantines, provider, model);
+    const cleared = pruneClearedQuarantineKeys(clearedQuarantineKeys.current, current.quarantines);
+    clearedQuarantineKeys.current = cleared;
+    const pending = activeClearedQuarantineKeys(cleared, current.quarantines);
+    const nextQ = quarantinesAfterReset(draft.quarantines, current.quarantines, provider, model, [...pending]);
+    // Remember what the snapshot held for this target so a LAGGING snapshot
+    // does not re-add it before the write lands.
+    for (const key of [`${provider}::${model}`, `${provider}:${model}`, provider]) {
+      cleared.set(key, (current.quarantines || {})[key]);
+    }
     update('quarantines', nextQ);
     if (scope?.set) {
       try {
@@ -765,8 +916,15 @@ export function SubagentsOrchestratorSection(props: any) {
 
   const activeEndpoints = (draft.endpoints || []).filter((e) => e.enabled !== false);
 
+  // Keys the user just cleared whose write has not landed yet: the display
+  // must treat them as healthy even though the snapshot still carries them.
+  const suppressedQuarantineKeys = activeClearedQuarantineKeys(
+    clearedQuarantineKeys.current,
+    current.quarantines
+  );
+
   const trippedCount = (draft.endpoints || []).filter((ep) =>
-    isEndpointTripped(ep, draft.quarantines, current.quarantines, now)
+    isEndpointTripped(ep, draft.quarantines, current.quarantines, now, suppressedQuarantineKeys)
   ).length;
 
   return (
@@ -907,8 +1065,8 @@ export function SubagentsOrchestratorSection(props: any) {
                 </tr>
               ) : (
                 (draft.endpoints || []).map((ep, idx) => {
-                  const unquarantineAt = endpointQuarantineUntil(ep, draft.quarantines, current.quarantines);
-                  const isTripped = isEndpointTripped(ep, draft.quarantines, current.quarantines, now);
+                  const unquarantineAt = endpointQuarantineUntil(ep, draft.quarantines, current.quarantines, suppressedQuarantineKeys);
+                  const isTripped = isEndpointTripped(ep, draft.quarantines, current.quarantines, now, suppressedQuarantineKeys);
                   const remainingMin =
                     isTripped && typeof unquarantineAt === 'number'
                       ? Math.max(1, Math.ceil((unquarantineAt - now) / 60000))
@@ -992,14 +1150,12 @@ export function SubagentsOrchestratorSection(props: any) {
                           max={100}
                           value={ep.weight || 1}
                           disabled={!writable}
-                          onChange={(e) => {
-                            const val = Number(e.target.value) || 1;
-                            setDraft((d) => {
-                              const endpoints = [...(d.endpoints || [])];
-                              if (endpoints[idx]) endpoints[idx] = { ...endpoints[idx], weight: val };
-                              return { ...d, endpoints };
-                            });
-                          }}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              endpoints: updateEndpointWeightAt(d.endpoints || [], idx, e.target.value)
+                            }))
+                          }
                         />
                       </td>
                     )}
@@ -1063,7 +1219,7 @@ export function SubagentsOrchestratorSection(props: any) {
                   min={1}
                   max={100}
                   value={newWeight}
-                  onChange={(e) => setNewWeight(Number(e.target.value) || 1)}
+                  onChange={(e) => setNewWeight(normalizeWeight(e.target.value))}
                 />
               )}
               <button
