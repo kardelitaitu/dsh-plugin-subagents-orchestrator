@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { apply, inject, NS, PLUGIN_ID } from '../src/client/index.jsx';
+import { apply, inject, NS, PLUGIN_ID, formatTrippingDuration } from '../src/client/index.jsx';
 import { bindEndpointTest } from '../src/client/testConnection.js';
 
 describe('Client Settings Section', () => {
@@ -73,4 +73,26 @@ describe('Client Settings Section', () => {
     expect(outcome.status).toBe('ok');
     expect(llm.discoverModels).toHaveBeenCalledOnce();
   });
+
+  describe('formatTrippingDuration', () => {
+    it('formats <= 60 minutes as plain minutes', () => {
+      expect(formatTrippingDuration(0)).toBe('0m');
+      expect(formatTrippingDuration(-5)).toBe('0m');
+      expect(formatTrippingDuration(1)).toBe('1m');
+      expect(formatTrippingDuration(15)).toBe('15m');
+      expect(formatTrippingDuration(45)).toBe('45m');
+      expect(formatTrippingDuration(60)).toBe('60m');
+    });
+
+    it('formats > 60 minutes as xh xm', () => {
+      expect(formatTrippingDuration(61)).toBe('1h 1m');
+      expect(formatTrippingDuration(75)).toBe('1h 15m');
+      expect(formatTrippingDuration(119)).toBe('1h 59m');
+      expect(formatTrippingDuration(120)).toBe('2h');
+      expect(formatTrippingDuration(125)).toBe('2h 5m');
+      expect(formatTrippingDuration(1300)).toBe('21h 40m');
+      expect(formatTrippingDuration(1362)).toBe('22h 42m');
+    });
+  });
 });
+

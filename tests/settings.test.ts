@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { armSettingsPanel, ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema } from '../src/settings.js';
+import { armSettingsPanel, ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, endpointSettingsSchema } from '../src/settings.js';
 import { setConfigForTest, resetConfigForTest, disposeWatcher, parseConfigDocument } from '../src/config.js';
 
 interface Registered {
@@ -146,5 +146,29 @@ describe('orchestratorSettingsSchema', () => {
   it('an item missing its required provider fails loudly, not silently', () => {
     const schema = orchestratorSettingsSchema as (data: unknown) => unknown;
     expect(() => schema({ endpoints: [{ model: 'no-provider' }] })).toThrow();
+  });
+
+  it('endpointSettingsSchema accepts and preserves reasoningEffort', () => {
+    const schema = endpointSettingsSchema as (data: unknown) => any;
+    const item = { provider: 'buddy-1', model: 'deepseek-v4.1-flash', reasoningEffort: 'medium', weight: 2, enabled: true };
+    const validated = schema(item);
+    expect(validated).toEqual(item);
+  });
+
+  it('preserves reasoningEffort on endpoints in orchestratorSettingsSchema and round-trips into parseConfigDocument', () => {
+    const schema = orchestratorSettingsSchema as (data: unknown) => any;
+    const edited = schema({
+      enabled: true,
+      endpoints: [
+        { provider: 'buddy-1', model: 'deepseek-v4.1-flash', reasoningEffort: 'medium', weight: 1, enabled: true },
+        { provider: 'buddy-2', model: 'hy4-preview', reasoningEffort: 'high' }
+      ]
+    });
+    expect(edited.endpoints).toEqual([
+      { provider: 'buddy-1', model: 'deepseek-v4.1-flash', reasoningEffort: 'medium', weight: 1, enabled: true },
+      { provider: 'buddy-2', model: 'hy4-preview', reasoningEffort: 'high' }
+    ]);
+    const reparsed = parseConfigDocument({ 'subagents-orchestrator': edited });
+    expect(reparsed?.endpoints).toEqual(edited.endpoints);
   });
 });

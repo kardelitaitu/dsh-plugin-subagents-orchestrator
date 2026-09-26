@@ -92,4 +92,81 @@ describe('apply() -> settings panel integration', () => {
     // endpoints stay untouched for the YAML path (non-strict object merge)
     expect(resolved.endpoints).toEqual([{ provider: 'kept', model: 'as-is' }]);
   });
+
+  it('hydrates quarantines on startup from settings scope and watches UI changes', () => {
+    const future = Date.now() + 600000;
+    let watcherCb: ((next: unknown) => void) | null = null;
+    const ctx = new MockCordisContext();
+    ctx.settings = {
+      register(ns: string, schema: unknown) {
+        return {
+          get: () => ({ quarantines: { 'p::m': future } }),
+          watch: (cb: (next: unknown) => void) => {
+            watcherCb = cb;
+          }
+        };
+      }
+    };
+    setConfigForTest({ enabled: true, ui: { panel: true }, endpoints: [{ provider: 'p', model: 'm' }] });
+
+    apply(ctx);
+
+    // Initial hydration landed in defaultCircuitBreaker
+    expect(defaultCircuitBreaker.isHealthy({ provider: 'p', model: 'm' })).toBe(false);
+
+    // Watcher notifies reset from UI
+    expect(watcherCb).toBeDefined();
+    watcherCb!({ quarantines: {} });
+    expect(defaultCircuitBreaker.isHealthy({ provider: 'p', model: 'm' })).toBe(true);
+  });
+
+  it('observes errors on root (non-subagent) sessions and records quarantine', async () => {
+    let mutated: any = null;
+    const ctx = new MockCordisContext();
+    ctx.settings = {
+      register: () => ({ get: () => undefined, watch: () => undefined }),
+      mutate: async (ns: string, ops: any[]) => {
+        mutated = { ns, ops };
+      }
+    };
+    setConfigForTest({
+      enabled: true,
+      ui: { panel: true },
+      endpoints: [
+        { provider: 'buddy-16', model: 'deepseek-v4.1-flash' },
+        { provider: 'buddy-1', model: 'deepseek-v4.1-flash' }
+      ]
+    });
+
+    apply(ctx);
+
+    // Root agent (origin is 'user' or absent, NOT 'subagent')
+    const rootAgent = { id: 'root-chat-session', session: { header: { origin: 'user' } } } as any;
+
+    // Simulate root request on buddy-16
+    await ctx.emit('agent/request', { agent: rootAgent }, () => ({
+      provider: 'buddy-16',
+      model: 'deepseek-v4.1-flash'
+    }));
+
+    // Simulate account-level failure (QUOTA)
+    const action = await ctx.emit(
+      'agent/request-error',
+      { agent: rootAgent, failure: { code: 'QUOTA' }, turn: 1, step: 1 },
+      () => 'host-fallback'
+    );
+
+    // Root agent gets delegated to host (action is 'host-fallback', no subagent rewrite)
+    expect(action).toBe('host-fallback');
+
+    // But circuit breaker recorded the failure and quarantined buddy-16!
+    expect(defaultCircuitBreaker.isHealthy({ provider: 'buddy-16', model: 'deepseek-v4.1-flash' })).toBe(false);
+
+    // And host settings service received the mutation to persist!
+    expect(mutated).toBeDefined();
+    expect(mutated.ns).toBe('subagents-orchestrator');
+    expect(mutated.ops[0].path).toEqual(['quarantines']);
+    expect(mutated.ops[0].value['buddy-16::deepseek-v4.1-flash']).toBeGreaterThan(Date.now());
+  });
 });
+

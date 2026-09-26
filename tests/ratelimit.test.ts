@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractCooldownHintMs, MAX_HINT_COOLDOWN_MS } from '../src/ratelimit.js';
+import { extractCooldownHintMs, MAX_HINT_COOLDOWN_MS, isClientSideError } from '../src/ratelimit.js';
 
 describe('Rate-Limit Cooldown Hint Parsing', () => {
   const NOW = 1_700_000_000_000;
@@ -98,5 +98,42 @@ describe('Rate-Limit Cooldown Hint Parsing', () => {
   it('returns null for garbage values', () => {
     expect(extractCooldownHintMs({ code: 'RATE_LIMIT', headers: { 'Retry-After': 'soon' } }, NOW)).toBeNull();
     expect(extractCooldownHintMs({ code: 'RATE_LIMIT', headers: { 'x-ratelimit-reset': '-5' } }, NOW)).toBeNull();
+  });
+});
+
+describe('Client-Side Error Discrimination (isClientSideError)', () => {
+  it('returns false for null, undefined, or empty failures', () => {
+    expect(isClientSideError(null)).toBe(false);
+    expect(isClientSideError(undefined)).toBe(false);
+    expect(isClientSideError({})).toBe(false);
+  });
+
+  it('returns false for server or rate-limit errors', () => {
+    expect(isClientSideError({ code: 'RATE_LIMIT', status: 429 })).toBe(false);
+    expect(isClientSideError({ code: 'SERVER', status: 500 })).toBe(false);
+    expect(isClientSideError({ code: 'TIMEOUT', status: 504 })).toBe(false);
+    expect(isClientSideError({ code: 'QUOTA' })).toBe(false);
+  });
+
+  it('detects HTTP 400 and 422 status codes', () => {
+    expect(isClientSideError({ status: 400 })).toBe(true);
+    expect(isClientSideError({ status: 422 })).toBe(true);
+    expect(isClientSideError({ response: { status: 400 } })).toBe(true);
+    expect(isClientSideError({ response: { status: 422 } })).toBe(true);
+  });
+
+  it('detects client error codes', () => {
+    expect(isClientSideError({ code: 'BAD_REQUEST' })).toBe(true);
+    expect(isClientSideError({ code: 'invalid_request' })).toBe(true);
+    expect(isClientSideError({ code: 'CONTEXT_LENGTH' })).toBe(true);
+  });
+
+  it('detects context length and token limit messages', () => {
+    expect(isClientSideError({ message: 'Error: context_length_exceeded' })).toBe(true);
+    expect(isClientSideError({ message: 'This model maximum context length is 8192 tokens.' })).toBe(true);
+    expect(isClientSideError({ message: 'The prompt is too long for this model.' })).toBe(true);
+    expect(isClientSideError({ message: 'Token count exceeds allowable limit' })).toBe(true);
+    expect(isClientSideError({ message: 'Invalid parameter: temperature must be between 0 and 2' })).toBe(true);
+    expect(isClientSideError({ message: 'Unsupported parameter: reasoning_effort' })).toBe(true);
   });
 });
