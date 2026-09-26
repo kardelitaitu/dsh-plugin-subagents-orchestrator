@@ -16,12 +16,13 @@ import {
   getCachedFallbackChain,
   getCachedMode,
   initWatcher,
-  disposeWatcher
+  disposeWatcher,
+  hydrateQuarantinesFromConfig
 } from './config.js';
-import { armSettingsPanel } from './settings.js';
+import { armSettingsPanel, persistQuarantines, disposeSettings } from './settings.js';
 import { pickNextEndpoint } from './balancer.js';
-import { defaultCircuitBreaker } from './health.js';
-import { extractCooldownHintMs } from './ratelimit.js';
+import { defaultCircuitBreaker, computeHourlyAlignedCooldown } from './health.js';
+import { extractCooldownHintMs, isClientSideError, isHardRateLimitError, isAccountLevelRateLimit } from './ratelimit.js';
 import { recordRequest, recordFailure, recordFailover, resetTelemetry, setDebugLogging, forgetAgent, recordTurnSuccess, recordTokenSample, poisonSuccessSpan } from './telemetry.js';
 import { flushTelemetryToDisk } from './persist.js';
 import { deliverFailoverNotice } from './notices.js';
@@ -91,6 +92,14 @@ export function apply(ctx: CordisContext): void {
   let rrCursor = 0;
   const pendingFailovers = new Map<string, FailoverState>();
   const activeEndpoints = new Map<string, Endpoint>();
+  /**
+   * Live routed subagents, for the soft concurrency cap. Root chat sessions
+   * also land in `activeEndpoints` (so the breaker can attribute their
+   * failures), but they are not subagents and must not consume cap slots —
+   * a couple of open chat sessions would otherwise push the whole subagent
+   * fleet into unrouted pass-through.
+   */
+  const activeSubagents = new Set<string>();
   /** One in-flight retry wait, cancellable so dispose can settle it promptly. */
   interface RetryWait {
     cancel(): void;
@@ -113,12 +122,67 @@ export function apply(ctx: CordisContext): void {
    */
   const exhaustedAgents = new Map<string, { turn: unknown; step: unknown }>();
 
+  /**
+   * Compare two host-supplied turn/step markers by VALUE.
+   *
+   * They are typed `unknown` because the host is the source of truth, and it
+   * is free to hand back a fresh object per event. Comparing with `===` then
+   * treated a value-equal marker as a different incident, so a spent walk was
+   * restarted and the retry rewritten onto another endpoint - the exact
+   * "ping-pong a fully dead pool" loop the exhaustion marker exists to stop.
+   * Primitives keep strict equality; objects/others fall back to a string
+   * projection, which is stable for the number/string markers the loop uses.
+   */
+  function sameIncidentMarker(a: unknown, b: unknown): boolean {
+    if (a === b) return true;
+    if (a === null || a === undefined || b === null || b === undefined) return false;
+
+    // Project to a primitive first: the host may hand back a wrapper carrying
+    // the same value (e.g. { valueOf: () => 1 }), and String() on such a
+    // wrapper yields "[object Object]" rather than the value it stands for.
+    // Number/String unwrapping honours valueOf, so a number and its wrapper
+    // compare equal while genuinely different ids still differ.
+    const prim = (v: unknown): string | number | boolean => {
+      const t = typeof v;
+      if (t === 'number' || t === 'string' || t === 'boolean') return v as string | number | boolean;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const n = Number(v as any);
+        if (!Number.isNaN(n)) return n;
+      } catch { /* fall through to the string projection */ }
+      try {
+        return String(v);
+      } catch {
+        return '__unprojectable__';
+      }
+    };
+
+    const pa = prim(a);
+    const pb = prim(b);
+    if (typeof pa === 'number' && typeof pb === 'number') return pa === pb;
+    return String(pa) === String(pb);
+  }
+
   // Start zero-latency in-memory config cache & file watcher
   initWatcher();
+
+  // Start-up only: restore persisted quarantine state. Deliberately not part
+  // of the watcher's reload path - a later reload must never re-apply a file
+  // snapshot over a quarantine the user just reset (see config.ts).
+  hydrateQuarantinesFromConfig();
 
   // Tier B: opt-in settings panel (ui.panel: true). Reads the just-loaded
   // cache; registers the settings namespace only when the user asked for it.
   armSettingsPanel(ctx);
+
+  function syncQuarantines(): void {
+    const q = defaultCircuitBreaker.getQuarantines();
+    // Persist only. The in-memory config object must NOT be mutated: it is the
+    // snapshot hydrateQuarantinesFromConfig() reads at start-up, so writing the
+    // live map into it lets a stale trip survive a reset and be re-hydrated on
+    // the next plugin init. Disk is the durable store; this object is not.
+    persistQuarantines(q).catch(() => {});
+  }
 
   /**
    * Wait out the configured retry interval before handing the host the retry
@@ -174,14 +238,14 @@ export function apply(ctx: CordisContext): void {
     if (request && request.agentOptions !== void 0) return request;
 
     // Soft concurrency cap (v2): starts over the cap are never rejected,
-    // queued or stalled — they pass through unrouted. activeEndpoints tracks
-    // exactly the live subagent entries the plugin attributed (set at
-    // agent/request, cleared at agent/disposed), so its size IS the global
-    // live count for cap purposes.
+    // queued or stalled — they pass through unrouted. `activeSubagents` is
+    // exactly the live routed-subagent count (added at agent/request, dropped
+    // at agent/disposed); root sessions are excluded, so open chat tabs can
+    // never starve subagent routing.
     const cap = config.totalSubagents;
-    if (typeof cap === 'number' && cap >= 0 && activeEndpoints.size >= cap) {
+    if (typeof cap === 'number' && cap >= 0 && activeSubagents.size >= cap) {
       if (config.debug) {
-        console.debug(`subagents-orchestrator: start over cap (${activeEndpoints.size}/${cap}) passes through unrouted`);
+        console.debug(`subagents-orchestrator: start over cap (${activeSubagents.size}/${cap}) passes through unrouted`);
       }
       return request;
     }
@@ -278,38 +342,77 @@ export function apply(ctx: CordisContext): void {
 
       const { agent, failure, signal } = payload;
       if (signal?.aborted) return next();
-      if (!isSubagent(agent)) return next();
       if (!failure || !FAILOVER_TRIGGER_CODES.includes(failure.code)) return next();
+      if (isClientSideError(failure)) return next();
 
-      // Attribution: the host always dispatches `agent/request` (recorded by
-      // the pass-through listener above) before any request can fail, so an
-      // unattributed error leaves us unable to count the endpoint's retries
-      // or pick a sensible next fallback — defer to the host instead.
-      const currentEndpoint = activeEndpoints.get(agent.id);
-      if (!currentEndpoint) return next();
-      const endpointKey = defaultCircuitBreaker.getEndpointKey(currentEndpoint);
+      // Resolve endpoint that failed
+      let currentEndpoint = agent?.id ? activeEndpoints.get(agent.id) : undefined;
+      const failedProvider = currentEndpoint?.provider || (typeof (payload as any).provider === 'string' ? (payload as any).provider : undefined);
+      const failedModel = currentEndpoint?.model || (typeof (payload as any).model === 'string' ? (payload as any).model : undefined);
+
+      if (!currentEndpoint && failedProvider && failedModel) {
+        currentEndpoint = { provider: failedProvider, model: failedModel };
+      }
+
+      // If the failed provider is not even part of our pool, ignore it
+      const inPool = endpoints.some((e) => e.provider === failedProvider);
+      if (!inPool && !currentEndpoint) return next();
 
       // A provider cooldown hint re-arms the walk BEFORE the exhaustion check:
       // the endpoint was tripped for the provider's exact window, so a prior
       // give-up of THIS incident is stale info. Other incidents are untouched.
       const hintMs = extractCooldownHintMs(failure);
-      if (hintMs !== null) {
+      if (hintMs !== null && agent?.id) {
         const marker = exhaustedAgents.get(agent.id);
-        if (marker && marker.turn === payload.turn && marker.step === payload.step) {
+        if (marker && sameIncidentMarker(marker.turn, payload.turn) && sameIncidentMarker(marker.step, payload.step)) {
           exhaustedAgents.delete(agent.id);
         }
       }
 
-      // Trip circuit breaker on failure. A provider cooldown hint
-      // (Retry-After / x-ratelimit-reset, host-parsed when available) trips
-      // the endpoint immediately for exactly that window; otherwise the
-      // consecutive-failure threshold and the configured cooldown apply.
-      defaultCircuitBreaker.recordFailure(
-        currentEndpoint,
-        hintMs !== null ? 1 : config.maxFailures || 3,
-        hintMs ?? config.cooldownMs ?? 60000
-      );
-      recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined, Date.now(), { turn: payload.turn, step: payload.step });
+      // Compute effective cooldown: align to top of next clock hour (:00 + 1m)
+      // if alignHourly is enabled and no explicit provider hint was supplied.
+      let effectiveCooldown = hintMs ?? config.cooldownMs ?? 3600000;
+      if (hintMs === null && config.alignHourly !== false) {
+        effectiveCooldown = computeHourlyAlignedCooldown(Date.now());
+      }
+
+      // Trip circuit breaker on failure.
+      // Account-level errors (QUOTA, credential errors, account-wide rate limits)
+      // trip all endpoints sharing this provider simultaneously.
+      const isAccountLevelError =
+        failure.code === 'QUOTA' ||
+        failure.code === 'INVALID_CREDENTIAL' ||
+        failure.code === 'MISSING_CREDENTIAL' ||
+        isAccountLevelRateLimit(failure);
+
+      if (isAccountLevelError && failedProvider) {
+        defaultCircuitBreaker.recordAccountFailure(
+          failedProvider,
+          endpoints,
+          effectiveCooldown
+        );
+      } else if (currentEndpoint) {
+        const threshold = (hintMs !== null || isHardRateLimitError(failure)) ? 1 : config.maxFailures || 3;
+        defaultCircuitBreaker.recordFailure(
+          currentEndpoint,
+          threshold,
+          effectiveCooldown
+        );
+      }
+      syncQuarantines();
+
+      if (agent?.id && currentEndpoint) {
+        recordFailure(agent.id, currentEndpoint, failure.code, hintMs !== null ? hintMs : undefined, Date.now(), { turn: payload.turn, step: payload.step });
+      }
+
+      // If this request was NOT from a subagent (e.g. root chat agent),
+      // we only observe health / trip breaker, but do not perform subagent failover routing!
+      if (!isSubagent(agent)) {
+        return next();
+      }
+
+      if (!currentEndpoint) return next();
+      const endpointKey = defaultCircuitBreaker.getEndpointKey(currentEndpoint);
 
       // The walk is spent for this incident: keep accounting the failure
       // (breaker + telemetry above) but defer the decision - never re-plan a
@@ -317,22 +420,24 @@ export function apply(ctx: CordisContext): void {
       const exhaustedMarker = exhaustedAgents.get(agent.id);
       if (
         exhaustedMarker &&
-        exhaustedMarker.turn === payload.turn &&
-        exhaustedMarker.step === payload.step
+        sameIncidentMarker(exhaustedMarker.turn, payload.turn) &&
+        sameIncidentMarker(exhaustedMarker.step, payload.step)
       ) {
         pendingFailovers.delete(agent.id);
         return next();
       }
 
-      // Terminal failures point at the account, not at transient load: an
-      // exhausted quota/balance and a broken credential cannot heal on the
+      // Terminal failures point at the account or hard limit, not at transient load: an
+      // exhausted quota/balance, broken credential, or hard frequency limit cannot heal on the
       // same endpoint, so pacing more retries against it is pure waste. They
       // skip the same-endpoint budget and switch accounts at once (same
       // exception as provider cooldown hints).
       const isTerminalFailure =
         failure.code === 'INVALID_CREDENTIAL' ||
         failure.code === 'MISSING_CREDENTIAL' ||
-        failure.code === 'QUOTA';
+        failure.code === 'QUOTA' ||
+        isAccountLevelError ||
+        isHardRateLimitError(failure);
 
       // Same-endpoint retry budget: retry the CURRENT endpoint up to
       // `maxRetries` times (default 20) with the configured 3-5s pacing
@@ -345,10 +450,13 @@ export function apply(ctx: CordisContext): void {
       // retries against it is futile — fail over immediately instead.
       if (hintMs === null && !isTerminalFailure) {
         const incident = retryIncidents.get(agent.id);
+        // Value comparison for the same reason as the exhaustion marker: a
+        // fresh value-equal turn/step must not reset the retry budget to 1,
+        // which would grant unlimited same-endpoint retries against a dead one.
         const sameIncident = incident !== undefined
           && incident.endpointKey === endpointKey
-          && incident.turn === payload.turn
-          && incident.step === payload.step;
+          && sameIncidentMarker(incident.turn, payload.turn)
+          && sameIncidentMarker(incident.step, payload.step);
         const retries = sameIncident ? incident.retries + 1 : 1;
         retryIncidents.set(agent.id, {
           endpointKey,
@@ -479,7 +587,9 @@ export function apply(ctx: CordisContext): void {
       pendingFailovers.set(agent.id, {
         count: current.count + 1,
         index: nextIndex,
-        tier: nextTier
+        tier: nextTier,
+        // Identity travels with the commit so a list edit cannot relocate it.
+        targetKey: defaultCircuitBreaker.getEndpointKey(target)
       });
 
       recordFailover(agent.id, currentEndpoint, target);
@@ -518,7 +628,23 @@ export function apply(ctx: CordisContext): void {
   // 3. Apply the fallback endpoint onto the retried request
   const disposeRequest = ctx.on('agent/request', async (payload: { agent: Agent; turn?: unknown; step?: unknown; [key: string]: any }, next: () => any) => {
     const { agent } = payload;
-    if (!isSubagent(agent)) return next();
+    if (!isSubagent(agent)) {
+      const seed = (await next()) as RequestSeed | null | undefined;
+      if (
+        agent?.id &&
+        seed &&
+        typeof seed.provider === 'string' &&
+        typeof seed.model === 'string'
+      ) {
+        const assigned: Endpoint = {
+          provider: seed.provider,
+          model: seed.model,
+          ...(typeof seed.reasoningEffort === 'string' ? { reasoningEffort: seed.reasoningEffort } : {})
+        };
+        activeEndpoints.set(agent.id, assigned);
+      }
+      return seed;
+    }
 
     const current = pendingFailovers.get(agent.id);
 
@@ -542,6 +668,7 @@ export function apply(ctx: CordisContext): void {
           ...(typeof seed.reasoningEffort === 'string' ? { reasoningEffort: seed.reasoningEffort } : {})
         };
         activeEndpoints.set(agent.id, assigned);
+        activeSubagents.add(agent.id);
         recordRequest(agent.id, assigned, Date.now(), { turn: payload.turn, step: payload.step });
       }
       return seed;
@@ -557,17 +684,32 @@ export function apply(ctx: CordisContext): void {
     }
 
     const endpoints = getCachedEndpoints();
+    const chain = current.tier === 'fallback' ? getCachedFallbackChain() : [];
+    const tierList = current.tier === 'fallback' ? chain : endpoints;
     // Tier-aware target (v2): a fallback-tier index addresses the rescue
-    // chain, not the primary list. The tier marker was recorded when the
-    // failover was committed; a hot-reload that shrinks the chain leaves
-    // the target undefined and the request passes through untouched.
-    const target =
-      current.tier === 'fallback'
-        ? getCachedFallbackChain()[current.index]
-        : endpoints[current.index];
+    // chain, not the primary list.
+    //
+    // Identity beats position: the commit recorded which endpoint it was made
+    // for, and a config edit between the commit and this retry may have
+    // reordered (or shrunk) the list. Resolving the identity keeps the rewrite
+    // on the account the failover actually chose; the index is only used when
+    // the endpoint is gone, and a vanished target passes through untouched
+    // rather than silently relocating onto a neighbour.
+    // A committed target is resolved by IDENTITY only. The positional index is
+    // a last resort for state that predates `targetKey`, never a substitute:
+    // falling back to `tierList[current.index]` after the identity lookup
+    // failed relocated the retry onto whatever now held that slot - a
+    // different (possibly tripped) account - which is the silent relocation
+    // this comment promises cannot happen.
+    const target = current.targetKey
+      ? [...endpoints, ...getCachedFallbackChain()].find(
+          (e) => defaultCircuitBreaker.getEndpointKey(e) === current.targetKey
+        )
+      : tierList[current.index];
     if (!target) return next();
 
     activeEndpoints.set(agent.id, target);
+    activeSubagents.add(agent.id);
     recordRequest(agent.id, target, Date.now(), { turn: payload.turn, step: payload.step });
 
     const seed = (await next()) as RequestSeed | null | undefined;
@@ -586,6 +728,7 @@ export function apply(ctx: CordisContext): void {
     if (agent?.id) {
       pendingFailovers.delete(agent.id);
       activeEndpoints.delete(agent.id);
+      activeSubagents.delete(agent.id);
       retryIncidents.delete(agent.id);
       exhaustedAgents.delete(agent.id);
       // Success-path latency bookkeeping has no other consumer: without
@@ -629,6 +772,11 @@ export function apply(ctx: CordisContext): void {
         tokens = undefined;
       }
       recordTurnSuccess(agent.id, tokens);
+      const activeEp = activeEndpoints.get(agent.id);
+      if (activeEp) {
+        defaultCircuitBreaker.recordSuccess(activeEp);
+        syncQuarantines();
+      }
     }
   );
 
@@ -653,11 +801,15 @@ export function apply(ctx: CordisContext): void {
     }
     pendingFailovers.clear();
     activeEndpoints.clear();
+    activeSubagents.clear();
     retryIncidents.clear();
     exhaustedAgents.clear();
     defaultCircuitBreaker.clear();
     resetTelemetry();
     disposeWatcher();
+    // Module-level handles are singletons: release them so a later apply()
+    // in the same process rebinds to the live host service, not this one.
+    disposeSettings();
     // Cancel in-flight retry waits so no late continuation mutates the
     // cleared state, then let them settle (all resolve promptly once cancelled).
     for (const wait of [...activeRetryWaits]) wait.cancel();
