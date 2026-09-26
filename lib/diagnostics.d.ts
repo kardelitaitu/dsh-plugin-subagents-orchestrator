@@ -70,7 +70,11 @@ interface DiagnosticsSnapshot {
         /** Routing is active (`enabled` unset or true). */
         active: boolean;
         strategy: string;
-        /** Auto-failover on error is engaged (`failover: true`). */
+        /**
+         * Auto-failover on error is engaged. Mirrors the runtime gate in
+         * index.ts: failover defaults to on, and only an explicit
+         * `failover: false` (on an enabled config) disables the walk.
+         */
         failover: boolean;
         cooldownMs: number;
         maxFailures: number;
