@@ -186,18 +186,47 @@ export function getDiagnosticsSnapshot(now: number = Date.now()): DiagnosticsSna
   };
 }
 
+/**
+ * ISO-8601 rendering that cannot throw.
+ *
+ * `new Date(x).toISOString()` raises RangeError for a finite but out-of-range
+ * timestamp (|x| > 8.64e15), and a persisted quarantine is adopted verbatim
+ * from the settings file, so such a value can reach a snapshot. Out-of-range
+ * inputs fall back to the raw epoch value instead of aborting the report.
+ */
+function toIsoOrRaw(value: number): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+}
+
+/**
+ * Collapse control characters so one endpoint always renders as one line.
+ *
+ * The identity is interpolated verbatim from config (the parser keeps any
+ * non-blank provider/model), so an embedded newline or tab would otherwise
+ * forge extra lines in the report — breaking the documented one-line-per-
+ * endpoint contract and allowing report/log injection.
+ */
+function singleLine(value: string): string {
+  // C0 controls, DEL + C1 controls (incl. NEL U+0085), and the Unicode line /
+  // paragraph separators U+2028 / U+2029 - all of which are line terminators to
+  // log viewers and to JS itself, so a raw one would still forge report lines.
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) => '\\x' + ch.charCodeAt(0).toString(16).padStart(2, '0'));
+}
+
 /** One human-readable line per endpoint for logs and support requests. */
 function formatEndpointLine(endpoint: EndpointDiagnostics): string {
   const parts: string[] = [];
   parts.push(endpoint.inPool ? 'pool' : 'parked');
-  parts.push(endpoint.breaker.healthy ? 'healthy' : `tripped-until=${new Date(endpoint.breaker.trippedUntil ?? 0).toISOString()}`);
+  parts.push(endpoint.breaker.healthy ? 'healthy' : `tripped-until=${toIsoOrRaw(endpoint.breaker.trippedUntil ?? 0)}`);
   if (endpoint.breaker.consecutiveFailures > 0) parts.push(`streak=${endpoint.breaker.consecutiveFailures}`);
   parts.push(`req=${endpoint.telemetry.requests} fail=${endpoint.telemetry.failures} failover=${endpoint.telemetry.failovers}`);
   if (endpoint.telemetry.latencySamples > 0) {
     const avg = Math.round(endpoint.telemetry.latencyTotalMs / endpoint.telemetry.latencySamples);
     parts.push(`fail-latency n=${endpoint.telemetry.latencySamples} avg=${avg}ms max=${endpoint.telemetry.latencyMaxMs}ms`);
   }
-  return `- ${endpoint.key} [${parts.join(' ')}]`;
+  return `- ${singleLine(endpoint.key)} [${parts.join(' ')}]`;
 }
 
 /**
@@ -206,7 +235,7 @@ function formatEndpointLine(endpoint: EndpointDiagnostics): string {
  */
 export function formatDiagnostics(snapshot: DiagnosticsSnapshot): string {
   const lines: string[] = [];
-  lines.push(`subagents-orchestrator diagnostics @ ${new Date(snapshot.generatedAt).toISOString()}`);
+  lines.push(`subagents-orchestrator diagnostics @ ${toIsoOrRaw(snapshot.generatedAt)}`);
   const o = snapshot.orchestration;
   lines.push(
     `config: ${snapshot.configPresent ? 'present' : 'missing'} | active=${o.active} strategy=${o.strategy} failover=${o.failover} | cooldown=${o.cooldownMs}ms maxFailures=${o.maxFailures} pacing=${o.retryIntervalMinMs}-${o.retryIntervalMaxMs}ms`
