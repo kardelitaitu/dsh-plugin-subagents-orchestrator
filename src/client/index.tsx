@@ -1,6 +1,5 @@
-import React, { useState, useCallback, useSyncExternalStore, useEffect } from 'react';
+import React, { useState, useCallback, useSyncExternalStore, useEffect, useRef } from 'react';
 import { bindEndpointTest } from './testConnection.js';
-import type { TestConnectionOutcome } from './testConnection.js';
 
 export const NS = 'subagents-orchestrator';
 export const PLUGIN_ID = 'dsh-plugin-subagents-orchestrator';
@@ -9,6 +8,7 @@ export const CSS_TAG = PLUGIN_ID + '/client.css';
 export interface EndpointRow {
   provider: string;
   model: string;
+  reasoningEffort?: string;
   weight?: number;
   enabled?: boolean;
 }
@@ -24,6 +24,8 @@ export interface ClientConfig {
   maxFailures?: number;
   intervalMinMs?: number;
   intervalMaxMs?: number;
+  alignHourly?: boolean;
+  quarantines?: Record<string, number>;
   debug?: boolean;
   persistTelemetry?: boolean;
 }
@@ -35,15 +37,68 @@ const DEFAULTS: ClientConfig = {
   mode: 'pool',
   endpoints: [],
   fallback: [],
-  cooldownMs: 60000,
+  cooldownMs: 3600000,
   maxFailures: 3,
   intervalMinMs: 3000,
   intervalMaxMs: 5000,
+  alignHourly: true,
+  quarantines: {},
   debug: false,
   persistTelemetry: false
 };
 
+/**
+ * Format tripping duration into human-readable text.
+ * When <= 60 minutes: e.g. "45m", "60m"
+ * When > 60 minutes: parsed to 'xh xm' (e.g. "1h 15m", "21h 40m", or "2h" if mins === 0).
+ */
+export function formatTrippingDuration(remainingMin: number): string {
+  if (remainingMin <= 0) return '0m';
+  if (remainingMin <= 60) return `${remainingMin}m`;
+  const hours = Math.floor(remainingMin / 60);
+  const mins = remainingMin % 60;
+  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
 const CSS = `
+.dso-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.dso-health-badge.ok {
+  background: rgba(46, 158, 91, 0.15);
+  color: var(--dsw-alias-state-success, #3fb950);
+}
+.dso-health-badge.tripped {
+  background: rgba(207, 34, 46, 0.18);
+  color: var(--dsw-alias-state-error, #f85149);
+}
+.dso-health-badge.probation {
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--dsw-alias-state-warning, #e3b341);
+}
+.dso-reset-btn {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  color: var(--dsw-alias-brand-primary, #58a6ff);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.dso-reset-btn:hover:not(:disabled) {
+  background: rgba(88, 166, 255, 0.15);
+  border-color: #58a6ff;
+}
 .dso-section {
   border-bottom: 1px solid var(--dsw-alias-border-l2, #e1e4e8);
   padding: 20px 0 24px;
@@ -216,53 +271,77 @@ const CSS = `
   border-bottom: none;
 }
 .dso-input {
-  border: 1px solid var(--dsw-alias-border-l2, #e1e4e8);
-  background: var(--dsw-alias-bg-layer-1, #fff);
-  color: var(--dsw-alias-label-primary, #111);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.04));
+  color: var(--dsw-alias-label-primary, inherit);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;
   outline: none;
 }
 .dso-input:focus {
-  border-color: var(--dsw-alias-brand-primary, #0969da);
+  border-color: var(--dsw-alias-brand-primary, #1f6feb);
+}
+.dso-input option {
+  background: var(--dsw-alias-bg-layer-1, #1e1e1e);
+  color: var(--dsw-alias-label-primary, #e6edf3);
 }
 .dso-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
-  margin-top: 8px;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 8px;
 }
 .dso-btn {
-  padding: 6px 14px;
+  padding: 7px 18px;
   font-size: 13px;
   font-weight: 600;
   border-radius: 6px;
   cursor: pointer;
   border: 1px solid transparent;
-  transition: all 0.15s;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
 }
 .dso-btn-primary {
-  background: var(--dsw-alias-brand-primary, #0969da);
-  color: #fff;
+  background: var(--dsw-alias-brand-primary, #ffffff);
+  color: var(--dsw-alias-label-inverse, #121212) !important;
+  font-weight: 700;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.dso-btn-primary:hover:not(:disabled) {
+  opacity: 0.92;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
 }
 .dso-btn-primary:disabled {
-  opacity: 0.5;
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.08));
+  color: var(--dsw-alias-label-tertiary, #8b949e) !important;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+  box-shadow: none;
   cursor: not-allowed;
+  opacity: 1;
 }
 .dso-btn-secondary {
-  background: var(--dsw-alias-bg-layer-2, #eee);
-  border-color: var(--dsw-alias-border-l2, #ddd);
-  color: var(--dsw-alias-label-primary, #222);
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.dso-btn-secondary:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.14));
 }
 .dso-btn-danger {
   background: transparent;
   border: none;
-  color: var(--dsw-alias-state-error, #cf222e);
+  color: var(--dsw-alias-state-error, #f85149);
   cursor: pointer;
   padding: 2px 6px;
   font-size: 12px;
+}
+.dso-btn-danger:hover:not(:disabled) {
+  text-decoration: underline;
 }
 .dso-add-row {
   display: flex;
@@ -273,7 +352,7 @@ const CSS = `
   align-items: center;
 }
 .dso-dirty-tag {
-  color: var(--dsw-alias-state-warning, #9a6700);
+  color: var(--dsw-alias-state-warning, #e3b341);
   font-size: 12px;
   font-weight: 600;
   margin-right: auto;
@@ -282,68 +361,81 @@ const CSS = `
   font-size: 12px;
   font-weight: 600;
 }
-.dso-status-ok { color: var(--dsw-alias-state-success, #2e9e5b); }
-.dso-status-fail { color: var(--dsw-alias-state-error, #cf222e); }
-.dso-test-btn {
+.dso-status-ok { color: var(--dsw-alias-state-success, #3fb950); }
+.dso-status-fail { color: var(--dsw-alias-state-error, #f85149); }
+.dso-refresh-health-btn {
   background: transparent;
-  border: 1px solid var(--dsw-alias-border-l2, #ddd);
-  color: var(--dsw-alias-label-primary, #222);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  color: var(--dsw-alias-label-secondary, inherit);
   border-radius: 4px;
-  padding: 2px 10px;
-  font-size: 12px;
-  font-weight: 500;
+  padding: 2px 8px;
+  font-size: 11px;
   cursor: pointer;
-  transition: all 0.12s;
+  transition: all 0.15s ease;
+  line-height: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
-.dso-test-btn:hover:not(:disabled) {
+.dso-refresh-health-btn:hover:not(:disabled) {
   border-color: var(--dsw-alias-brand-primary, #0969da);
   color: var(--dsw-alias-brand-primary, #0969da);
+  background: rgba(9, 105, 218, 0.08);
 }
-.dso-test-btn:disabled {
+.dso-refresh-health-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.dso-refresh-health-btn.spinning i {
+  display: inline-block;
+  animation: dso-spin 0.6s linear infinite;
+}
+@keyframes dso-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.dso-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+}
+.dso-health-badge.ok {
+  background: rgba(46, 158, 91, 0.15);
+  color: var(--dsw-alias-state-success, #2e9e5b);
+}
+.dso-health-badge.tripped {
+  background: rgba(207, 34, 46, 0.15);
+  color: var(--dsw-alias-state-error, #cf222e);
+}
+.dso-health-badge.probation {
+  background: rgba(227, 179, 65, 0.15);
+  color: var(--dsw-alias-state-warning, #e3b341);
+}
+.dso-reset-btn {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  color: var(--dsw-alias-brand-primary, #0969da);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.12s;
+  line-height: 14px;
+}
+.dso-reset-btn:hover:not(:disabled) {
+  border-color: var(--dsw-alias-brand-primary, #0969da);
+  background: rgba(9, 105, 218, 0.08);
+}
+.dso-reset-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.dso-test-panel {
-  border-top: 1px dashed var(--dsw-alias-border-l2, #ddd);
-  background: var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.015));
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-}
-.dso-test-line {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.dso-test-label {
-  color: var(--dsw-alias-label-tertiary, #777);
-  flex: none;
-}
-.dso-test-input {
-  border: 1px solid var(--dsw-alias-border-l2, #e1e4e8);
-  background: var(--dsw-alias-bg-layer-1, #fff);
-  color: var(--dsw-alias-label-primary, #111);
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  outline: none;
-  flex: 1;
-  min-width: 160px;
-}
-.dso-test-input:focus {
-  border-color: var(--dsw-alias-brand-primary, #0969da);
-}
-.dso-test-result {
-  line-height: 1.5;
-  word-break: break-word;
-}
-.dso-test-result.ok { color: var(--dsw-alias-state-success, #2e9e5b); }
-.dso-test-result.fail { color: var(--dsw-alias-state-error, #cf222e); }
-.dso-test-result.warn { color: var(--dsw-alias-state-warning, #9a6700); }
-.dso-test-result.idle { color: var(--dsw-alias-label-tertiary, #777); }
 `;
 
 function ensureCss() {
@@ -364,8 +456,13 @@ export function bindSnapshotSelector(scope: any) {
   };
 }
 
-function projectConfig(value: any): ClientConfig {
-  if (!value || typeof value !== 'object') return { ...DEFAULTS };
+export function projectConfig(value: any): ClientConfig {
+  // Fresh containers: a shallow spread of DEFAULTS would hand every caller the
+  // same mutable `quarantines`/`endpoints` objects, so one panel's edit leaked
+  // into the next projection.
+  if (!value || typeof value !== 'object') {
+    return { ...DEFAULTS, endpoints: [], fallback: [], quarantines: {} };
+  }
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : DEFAULTS.enabled,
     strategy: value.strategy || DEFAULTS.strategy,
@@ -377,9 +474,158 @@ function projectConfig(value: any): ClientConfig {
     maxFailures: typeof value.maxFailures === 'number' ? value.maxFailures : DEFAULTS.maxFailures,
     intervalMinMs: typeof value.intervalMinMs === 'number' ? value.intervalMinMs : DEFAULTS.intervalMinMs,
     intervalMaxMs: typeof value.intervalMaxMs === 'number' ? value.intervalMaxMs : DEFAULTS.intervalMaxMs,
+    alignHourly: typeof value.alignHourly === 'boolean' ? value.alignHourly : DEFAULTS.alignHourly,
+    quarantines: value.quarantines && typeof value.quarantines === 'object' ? value.quarantines : {},
     debug: typeof value.debug === 'boolean' ? value.debug : DEFAULTS.debug,
     persistTelemetry: typeof value.persistTelemetry === 'boolean' ? value.persistTelemetry : DEFAULTS.persistTelemetry
   };
+}
+
+/**
+ * The ordered [key, value] writes `save()` would submit: every draft field whose
+ * JSON projection differs from `current`. Extracted so the panel's write set is
+ * testable without a DOM.
+ */
+export function planConfigWrites(
+  draft: ClientConfig,
+  current: ClientConfig
+): Array<[keyof ClientConfig, any]> {
+  const writes: Array<[keyof ClientConfig, any]> = [];
+  for (const [key, value] of Object.entries(draft)) {
+    // `quarantines` is written exclusively by the immediate Reset path
+    // (scope.set), never through draft+Save. The sync effect deliberately does
+    // not hydrate it into the draft, so including it here would write the
+    // draft's empty/partial map over the host's live quarantine set and wipe
+    // every endpoint's cooldown on the next Save.
+    if (key === 'quarantines') continue;
+    if (JSON.stringify(current[key as keyof ClientConfig]) !== JSON.stringify(value)) {
+      writes.push([key as keyof ClientConfig, value]);
+    }
+  }
+  return writes;
+}
+
+/** The draft fields the Save flow owns (everything except host-owned quarantines). */
+function configForDirtyCheck(config: ClientConfig): Omit<ClientConfig, 'quarantines'> {
+  const { quarantines: _ignored, ...rest } = config;
+  return rest;
+}
+
+/** True when the draft diverges from the snapshot projection on a Save-owned field. */
+export function isConfigDirty(draft: ClientConfig, current: ClientConfig): boolean {
+  return JSON.stringify(configForDirtyCheck(draft)) !== JSON.stringify(configForDirtyCheck(current));
+}
+
+/**
+ * The quarantine expiry timestamp applying to `endpoint`, if any.
+ *
+ * Lookup order per source: `provider::model` (the runtime's key shape), then
+ * `provider:model`, then bare `provider`; the draft's map wins over the
+ * snapshot's.
+ */
+export function endpointQuarantineUntil(
+  endpoint: EndpointRow,
+  draftQuarantines: Record<string, number> | undefined,
+  currentQuarantines: Record<string, number> | undefined
+): number | undefined {
+  const draft = draftQuarantines || {};
+  const current = currentQuarantines || {};
+  const at =
+    draft[`${endpoint.provider}::${endpoint.model}`] ??
+    draft[`${endpoint.provider}:${endpoint.model}`] ??
+    draft[endpoint.provider] ??
+    current[`${endpoint.provider}::${endpoint.model}`] ??
+    current[`${endpoint.provider}:${endpoint.model}`] ??
+    current[endpoint.provider];
+  return typeof at === 'number' ? at : undefined;
+}
+
+/** Whether `endpoint` is currently in cooldown. */
+export function isEndpointTripped(
+  endpoint: EndpointRow,
+  draftQuarantines: Record<string, number> | undefined,
+  currentQuarantines: Record<string, number> | undefined,
+  now: number
+): boolean {
+  const at = endpointQuarantineUntil(endpoint, draftQuarantines, currentQuarantines);
+  return typeof at === 'number' && at > now;
+}
+
+/** Draft quarantines with every key shape for (provider, model) cleared. */
+export function quarantinesAfterReset(
+  draftQuarantines: Record<string, number> | undefined,
+  currentQuarantines: Record<string, number> | undefined,
+  provider: string,
+  model: string
+): Record<string, number> {
+  const next = { ...(draftQuarantines || {}) };
+  // The draft is NOT hydrated with quarantines (the sync effect excludes the
+  // field), so the snapshot's entries must be merged in first: writing the
+  // draft map alone dropped every OTHER endpoint's quarantine.
+  for (const [key, value] of Object.entries(currentQuarantines || {})) {
+    if (!(key in next)) next[key] = value;
+  }
+  delete next[`${provider}::${model}`];
+  delete next[`${provider}:${model}`];
+  delete next[provider];
+  return next;
+}
+
+/** Flip one endpoint's enabled flag; out-of-range indexes are left untouched. */
+export function toggleEndpointAt(endpoints: EndpointRow[], index: number): EndpointRow[] {
+  const next = [...endpoints];
+  if (next[index]) {
+    next[index] = { ...next[index], enabled: next[index].enabled === false ? true : false };
+  }
+  return next;
+}
+
+/** Remove one endpoint by index. */
+export function removeEndpointAt(endpoints: EndpointRow[], index: number): EndpointRow[] {
+  return endpoints.filter((_, i) => i !== index);
+}
+
+/** Build a new endpoint row, or null when provider/model are blank. */
+export function buildEndpointRow(
+  provider: string,
+  model: string,
+  reasoningEffort: string,
+  weight: number
+): EndpointRow | null {
+  if (!provider.trim() || !model.trim()) return null;
+  return {
+    provider: provider.trim(),
+    model: model.trim(),
+    ...(reasoningEffort.trim() ? { reasoningEffort: reasoningEffort.trim() } : {}),
+    // The panel's weight inputs declare min=1; `Number(x) || 1` only catches
+    // 0/NaN, so a typed negative would otherwise be stored as-is.
+    weight: Math.max(1, Number(weight) || 1),
+    enabled: true
+  };
+}
+
+/**
+ * Adopt snapshot fields into the draft without discarding unsaved edits.
+ *
+ * `prevSnap` is the projection the draft was last reconciled against. A field
+ * whose draft value diverges from it is a pending user edit and is kept; every
+ * other field takes the incoming snapshot value. `quarantines` is never
+ * adopted (Reset owns that field through the immediate side-effecting path).
+ */
+export function mergeSnapshotIntoDraft(
+  prev: ClientConfig,
+  prevSnap: ClientConfig | undefined,
+  next: ClientConfig
+): ClientConfig {
+  const merged: ClientConfig = { ...prev };
+  for (const key of Object.keys(next) as Array<keyof ClientConfig>) {
+    if (key === 'quarantines') continue;
+    const draftJSON = JSON.stringify(prev[key]);
+    const pendingEdit = prevSnap !== undefined && draftJSON !== JSON.stringify(prevSnap[key]);
+    if (pendingEdit) continue;
+    (merged as any)[key] = next[key];
+  }
+  return merged;
 }
 
 export function SubagentsOrchestratorSection(props: any) {
@@ -407,149 +653,94 @@ export function SubagentsOrchestratorSection(props: any) {
   const [saveState, setSaveState] = useState<'saving' | 'ok' | 'fail' | null>(null);
   const [newProv, setNewProv] = useState('');
   const [newModel, setNewModel] = useState('');
+  const [newReasoningEffort, setNewReasoningEffort] = useState('');
   const [newWeight, setNewWeight] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  // The projection the draft was last reconciled against, so the sync effect
+  // can tell a pending user edit from a snapshot change.
+  const lastSnapValue = useRef<any>(undefined);
 
-  // Test Connection drawer state (one row at a time).
-  const endpointTest = props?.endpointTest ?? props?.inject?.endpointTest;
-  const [testRow, setTestRow] = useState<number | null>(null);
-  const [testURL, setTestURL] = useState('');
-  const [testKey, setTestKey] = useState('');
-  const [testState, setTestState] = useState<TestConnectionOutcome | null>(null);
-  const [testing, setTesting] = useState(false);
-  const testAbortRef = React.useRef<AbortController | null>(null);
-  const testPrefillSeqRef = React.useRef(0);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(timer);
+  }, []);
 
-  const openTest = (index: number) => {
-    const ep = (draft.endpoints || [])[index];
-    if (!ep || !endpointTest) return;
-    setTestRow(index);
-    setTestURL('');
-    setTestKey('');
-    setTestState(null);
-    setTesting(false);
-    // Best-effort prefill of the draft baseURL from the provider's stored
-    // profile (llm-pi-ai section), guarded against a stale async reply.
-    const seq = ++testPrefillSeqRef.current;
-    Promise.resolve(endpointTest.storedBaseURL?.(ep.provider))
-      .then((url: unknown) => {
-        if (seq !== testPrefillSeqRef.current) return;
-        if (typeof url === 'string' && url.length > 0) setTestURL((prev) => (prev.length === 0 ? url : prev));
-      })
-      .catch(() => {});
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refreshHealth = () => {
+    setRefreshing(true);
+    // Display-only refresh: the health badges derive from `current` and
+    // `draft` for the current render, and bumping `now` re-evaluates them.
+    // Writing the snapshot's quarantines into the draft here would resurrect a
+    // trip the user had just reset (the snapshot lags the Reset write).
+    setNow(Date.now());
+    setTimeout(() => setRefreshing(false), 500);
   };
 
-  const closeTest = () => {
-    testAbortRef.current?.abort();
-    testAbortRef.current = null;
-    setTestRow(null);
-    setTestState(null);
-    setTesting(false);
+  const resetAllHealth = async () => {
+    update('quarantines', {});
+    if (scope?.set) {
+      try {
+        await scope.set('quarantines', {});
+      } catch {}
+    }
   };
 
-  const runTest = useCallback(async () => {
-    const ep = testRow === null ? undefined : (draft.endpoints || [])[testRow];
-    if (!ep || !endpointTest || testing) return;
-    const controller = new AbortController();
-    testAbortRef.current = controller;
-    setTesting(true);
-    setTestState(null);
-    try {
-      const outcome = await endpointTest.run(
-        {
-          provider: ep.provider,
-          model: ep.model,
-          baseURL: testURL.trim() || undefined,
-          apiKey: testKey.trim() || undefined
-        },
-        controller.signal
-      );
-      setTestState(outcome);
-    } catch (error) {
-      setTestState({ status: 'fail', message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setTesting(false);
-      testAbortRef.current = null;
-    }
-  }, [draft, endpointTest, testRow, testURL, testKey, testing]);
-
-  const renderTestResult = () => {
-    if (testing) return <span className="dso-test-result idle">Probing endpoint…</span>;
-    if (!testState) {
-      return <span className="dso-test-result idle">Run the probe to verify the endpoint answers and serves this model. The draft is never saved.</span>;
-    }
-    if (testState.status === 'unavailable') {
-      return <span className="dso-test-result warn">{testState.message}</span>;
-    }
-    if (testState.status === 'fail') {
-      return (
-        <span className="dso-test-result fail">
-          Probe failed{typeof testState.latencyMs === 'number' ? ` (${testState.latencyMs} ms)` : ''}: {testState.message}
-        </span>
-      );
-    }
-    const modelName = testRow === null ? '' : (draft.endpoints || [])[testRow]?.model ?? '';
-    const warn = testState.modelFound === false || testState.models.length === 0;
-    const modelLine = testState.modelFound === null
-      ? ''
-      : testState.modelFound
-        ? ` Model ${modelName} is served${testState.modelContextWindow !== undefined ? ` (context window ${testState.modelContextWindow} tokens)` : ''}.`
-        : ` Model ${modelName} was NOT in the listing — check the spelling or the endpoint's exposure.`;
-    return (
-      <span className={`dso-test-result ${warn ? 'warn' : 'ok'}`}>
-        Reachable in {testState.latencyMs} ms · {testState.models.length} model(s) advertised.{modelLine}
-      </span>
-    );
-  };
-
-  // Sync draft when snap first arrives
+  // Sync draft when snap first arrives.
+  //
+  // `quarantines` is deliberately excluded: it is the one field the panel
+  // mutates through an immediate side-effecting Reset rather than through the
+  // draft+Save flow. Spread-inducing it here let a snapshot that still carried
+  // the pre-reset trip be merged back into the draft, so the next Save
+  // re-persisted the trip the user had just cleared. Display reads it from
+  // `current`/`draft` directly, and Reset writes it explicitly.
   useEffect(() => {
     if (snap?.value) {
-      setDraft((prev) => ({
-        ...prev,
-        ...projectConfig(snap.value),
-        endpoints: snap.value.endpoints ?? prev.endpoints ?? []
-      }));
+      const nextSnap = projectConfig(snap.value);
+      const prevSnap = lastSnapValue.current;
+      lastSnapValue.current = nextSnap;
+      setDraft((prev) => mergeSnapshotIntoDraft(prev, prevSnap, nextSnap));
     }
   }, [snap?.revision, ready]);
 
-  const dirty = JSON.stringify(draft) !== currentKey;
+  const dirty = isConfigDirty(draft, current);
 
   const update = (field: keyof ClientConfig, value: any) => {
     setDraft((d) => ({ ...d, [field]: value }));
   };
 
   const toggleEndpoint = (index: number) => {
-    setDraft((d) => {
-      const endpoints = [...(d.endpoints || [])];
-      if (endpoints[index]) {
-        endpoints[index] = {
-          ...endpoints[index],
-          enabled: endpoints[index].enabled === false ? true : false
-        };
-      }
-      return { ...d, endpoints };
-    });
+    setDraft((d) => ({ ...d, endpoints: toggleEndpointAt(d.endpoints || [], index) }));
   };
 
   const removeEndpoint = (index: number) => {
-    setDraft((d) => {
-      const endpoints = (d.endpoints || []).filter((_, i) => i !== index);
-      return { ...d, endpoints };
-    });
+    setDraft((d) => ({ ...d, endpoints: removeEndpointAt(d.endpoints || [], index) }));
+  };
+
+  const resetEndpointHealth = async (provider: string, model: string) => {
+    const nextQ = quarantinesAfterReset(draft.quarantines, current.quarantines, provider, model);
+    update('quarantines', nextQ);
+    if (scope?.set) {
+      try {
+        await scope.set('quarantines', nextQ);
+      } catch {}
+    }
   };
 
   const addEndpoint = () => {
-    if (!newProv.trim() || !newModel.trim()) return;
+    const item = buildEndpointRow(newProv, newModel, newReasoningEffort, newWeight);
+    if (!item) return;
     setDraft((d) => ({
       ...d,
       endpoints: [
         ...(d.endpoints || []),
-        { provider: newProv.trim(), model: newModel.trim(), weight: Number(newWeight) || 1, enabled: true }
+        item
       ]
     }));
     setNewProv('');
     setNewModel('');
+    setNewReasoningEffort('');
     setNewWeight(1);
   };
 
@@ -557,10 +748,8 @@ export function SubagentsOrchestratorSection(props: any) {
     if (!scope) return;
     setSaveState('saving');
     try {
-      for (const [key, value] of Object.entries(draft)) {
-        if (JSON.stringify(current[key as keyof ClientConfig]) !== JSON.stringify(value)) {
-          await scope.set(key, value);
-        }
+      for (const [key, value] of planConfigWrites(draft, current)) {
+        await scope.set(key, value);
       }
       setSaveState('ok');
       setTimeout(() => setSaveState(null), 3000);
@@ -575,6 +764,10 @@ export function SubagentsOrchestratorSection(props: any) {
   };
 
   const activeEndpoints = (draft.endpoints || []).filter((e) => e.enabled !== false);
+
+  const trippedCount = (draft.endpoints || []).filter((ep) =>
+    isEndpointTripped(ep, draft.quarantines, current.quarantines, now)
+  ).length;
 
   return (
     <div className="dso-section">
@@ -647,8 +840,32 @@ export function SubagentsOrchestratorSection(props: any) {
       </div>
 
       <div className="dso-group">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span className="dso-group-title">Configured Endpoints Pool</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="dso-group-title">Configured Endpoints Pool</span>
+            <button
+              type="button"
+              className={`dso-refresh-health-btn ${refreshing ? 'spinning' : ''}`}
+              title="Refresh health status from host"
+              disabled={refreshing}
+              onClick={refreshHealth}
+            >
+              <i>↻</i>
+              {refreshing ? 'Refreshing…' : 'Refresh Health'}
+            </button>
+            {trippedCount > 0 && (
+              <button
+                type="button"
+                className="dso-btn-danger"
+                style={{ fontSize: 11, padding: '2px 8px', border: '1px solid currentColor', borderRadius: 4, textDecoration: 'none' }}
+                title="Reset all tripped endpoints back to healthy immediately"
+                disabled={!writable}
+                onClick={resetAllHealth}
+              >
+                Reset All ({trippedCount})
+              </button>
+            )}
+          </div>
           <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #888)' }}>
             {activeEndpoints.length} in rotation / {(draft.endpoints || []).length} total
           </span>
@@ -661,6 +878,22 @@ export function SubagentsOrchestratorSection(props: any) {
                 <th style={{ width: 40 }}>Active</th>
                 <th>Provider ID</th>
                 <th>Model</th>
+                <th style={{ width: 85 }}>Reasoning</th>
+                <th style={{ width: 125 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>Health</span>
+                    <button
+                      type="button"
+                      className={`dso-refresh-health-btn ${refreshing ? 'spinning' : ''}`}
+                      style={{ padding: '1px 5px', fontSize: 11 }}
+                      title="Refresh health status"
+                      disabled={refreshing}
+                      onClick={refreshHealth}
+                    >
+                      <i>↻</i>
+                    </button>
+                  </div>
+                </th>
                 {draft.strategy === 'weighted' && <th style={{ width: 70 }}>Weight</th>}
                 <th style={{ width: 60 }}>Action</th>
               </tr>
@@ -668,23 +901,87 @@ export function SubagentsOrchestratorSection(props: any) {
             <tbody>
               {(draft.endpoints || []).length === 0 ? (
                 <tr>
-                  <td colSpan={draft.strategy === 'weighted' ? 5 : 4} style={{ textAlign: 'center', color: '#999', padding: '16px 0' }}>
+                  <td colSpan={draft.strategy === 'weighted' ? 7 : 6} style={{ textAlign: 'center', color: '#999', padding: '16px 0' }}>
                     No endpoints configured. Subagents will use default parent session model.
                   </td>
                 </tr>
               ) : (
-                (draft.endpoints || []).map((ep, idx) => (
-                  <tr key={`${ep.provider}-${ep.model}-${idx}`} style={{ opacity: ep.enabled === false ? 0.5 : 1 }}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={ep.enabled !== false}
-                        disabled={!writable}
-                        onChange={() => toggleEndpoint(idx)}
-                      />
-                    </td>
-                    <td><strong>{ep.provider}</strong></td>
-                    <td><code>{ep.model}</code></td>
+                (draft.endpoints || []).map((ep, idx) => {
+                  const unquarantineAt = endpointQuarantineUntil(ep, draft.quarantines, current.quarantines);
+                  const isTripped = isEndpointTripped(ep, draft.quarantines, current.quarantines, now);
+                  const remainingMin =
+                    isTripped && typeof unquarantineAt === 'number'
+                      ? Math.max(1, Math.ceil((unquarantineAt - now) / 60000))
+                      : 0;
+
+                  return (
+                    <tr key={`${ep.provider}-${ep.model}-${idx}`} style={{ opacity: ep.enabled === false ? 0.5 : 1 }}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={ep.enabled !== false}
+                          disabled={!writable}
+                          onChange={() => toggleEndpoint(idx)}
+                        />
+                      </td>
+                      <td><strong>{ep.provider}</strong></td>
+                      <td><code>{ep.model}</code></td>
+                      <td>
+                        <select
+                          className="dso-input"
+                          style={{ width: 75, fontSize: 11, padding: '2px 4px' }}
+                          value={ep.reasoningEffort === 'medium' ? 'med' : ep.reasoningEffort || ''}
+                          disabled={!writable}
+                          onChange={(e) => {
+                            const val = e.target.value.trim();
+                            setDraft((d) => {
+                              const endpoints = [...(d.endpoints || [])];
+                              if (endpoints[idx]) {
+                                const updated = { ...endpoints[idx] };
+                                if (val) {
+                                  updated.reasoningEffort = val === 'med' ? 'medium' : val;
+                                } else {
+                                  delete updated.reasoningEffort;
+                                }
+                                endpoints[idx] = updated;
+                              }
+                              return { ...d, endpoints };
+                            });
+                          }}
+                        >
+                          <option value="">default</option>
+                          <option value="off">off</option>
+                          <option value="low">low</option>
+                          <option value="med">med</option>
+                          <option value="high">high</option>
+                          <option value="max">max</option>
+                        </select>
+                      </td>
+                      <td>
+                        {ep.enabled === false ? (
+                          <span style={{ color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 11 }}>Disabled</span>
+                        ) : isTripped ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            <span
+                              className="dso-health-badge tripped"
+                              title={`Cooling down until ${new Date(unquarantineAt!).toLocaleDateString() === new Date(now).toLocaleDateString() ? new Date(unquarantineAt!).toLocaleTimeString() : new Date(unquarantineAt!).toLocaleString()}`}
+                            >
+                              🔴 Tripped ({formatTrippingDuration(remainingMin)})
+                            </span>
+                            <button
+                              type="button"
+                              className="dso-reset-btn"
+                              disabled={!writable}
+                              title="Clear quarantine immediately"
+                              onClick={() => resetEndpointHealth(ep.provider, ep.model)}
+                            >
+                              Reset
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="dso-health-badge ok">🟢 Healthy</span>
+                        )}
+                      </td>
                     {draft.strategy === 'weighted' && (
                       <td>
                         <input
@@ -707,16 +1004,6 @@ export function SubagentsOrchestratorSection(props: any) {
                       </td>
                     )}
                     <td>
-                      {endpointTest && (
-                        <button
-                          type="button"
-                          className="dso-test-btn"
-                          disabled={testing && testRow !== idx}
-                          onClick={() => (testRow === idx ? closeTest() : openTest(idx))}
-                        >
-                          {testRow === idx ? 'Close' : 'Test'}
-                        </button>
-                      )}
                       <button
                         type="button"
                         className="dso-btn-danger"
@@ -727,47 +1014,10 @@ export function SubagentsOrchestratorSection(props: any) {
                       </button>
                     </td>
                   </tr>
-                ))
-              )}
+                );
+              }))}
             </tbody>
           </table>
-
-          {testRow !== null && endpointTest && (
-            <div className="dso-test-panel">
-              <div className="dso-test-line">
-                <span className="dso-test-label">Base URL</span>
-                <input
-                  type="text"
-                  className="dso-test-input"
-                  placeholder="https://…/v1  (prefilled from the provider's stored profile when present)"
-                  value={testURL}
-                  disabled={testing}
-                  onChange={(e) => setTestURL(e.target.value)}
-                />
-              </div>
-              <div className="dso-test-line">
-                <span className="dso-test-label">API key</span>
-                <input
-                  type="password"
-                  className="dso-test-input"
-                  placeholder="leave empty to use the stored key for this provider"
-                  value={testKey}
-                  disabled={testing}
-                  onChange={(e) => setTestKey(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="dso-btn dso-btn-primary"
-                  style={{ padding: '3px 12px', fontSize: 12 }}
-                  disabled={testing}
-                  onClick={runTest}
-                >
-                  {testing ? 'Probing…' : 'Run Probe'}
-                </button>
-              </div>
-              <div>{renderTestResult()}</div>
-            </div>
-          )}
 
           {writable && (
             <div className="dso-add-row">
@@ -787,6 +1037,23 @@ export function SubagentsOrchestratorSection(props: any) {
                 value={newModel}
                 onChange={(e) => setNewModel(e.target.value)}
               />
+              <select
+                className="dso-input"
+                style={{ width: 85 }}
+                value={newReasoningEffort === 'medium' ? 'med' : newReasoningEffort}
+                onChange={(e) => {
+                  const val = e.target.value.trim();
+                  setNewReasoningEffort(val === 'med' ? 'medium' : val);
+                }}
+                title="Reasoning Effort"
+              >
+                <option value="">default</option>
+                <option value="off">off</option>
+                <option value="low">low</option>
+                <option value="med">med</option>
+                <option value="high">high</option>
+                <option value="max">max</option>
+              </select>
               {draft.strategy === 'weighted' && (
                 <input
                   type="number"
@@ -843,10 +1110,10 @@ export function SubagentsOrchestratorSection(props: any) {
                 className="dso-input"
                 style={{ width: '100%' }}
                 min={1000}
-                step={5000}
-                value={draft.cooldownMs || 60000}
+                step={60000}
+                value={draft.cooldownMs || 3600000}
                 disabled={!writable}
-                onChange={(e) => update('cooldownMs', Number(e.target.value) || 60000)}
+                onChange={(e) => update('cooldownMs', Number(e.target.value) || 3600000)}
               />
             </div>
             <div>
@@ -874,6 +1141,21 @@ export function SubagentsOrchestratorSection(props: any) {
                 disabled={!writable}
                 onChange={(e) => update('intervalMaxMs', Number(e.target.value) || 5000)}
               />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, gridColumn: '1 / -1', marginTop: 4 }}>
+              <input
+                type="checkbox"
+                id="dso-align-hourly"
+                checked={draft.alignHourly !== false}
+                disabled={!writable}
+                onChange={(e) => update('alignHourly', e.target.checked)}
+              />
+              <label htmlFor="dso-align-hourly" style={{ fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                Align Cooldown to Next Clock Hour (:00 + 1m grace)
+              </label>
+              <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #777)' }}>
+                Syncs cooldowns with upstream quota reset schedules (e.g. CodeBuddy hourly resets)
+              </span>
             </div>
           </div>
         )}
