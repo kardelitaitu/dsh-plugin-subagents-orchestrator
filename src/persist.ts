@@ -99,14 +99,28 @@ export function readPersistedEvents(limit: number = 500): TelemetryEvent[] {
       .sort(); // lexicographic == chronological for zero-padded dates
     const out: TelemetryEvent[] = [];
     for (let i = files.length - 1; i >= 0 && out.length < limit; i--) {
-      const raw = fs.readFileSync(path.join(persistDir, files[i]), 'utf8');
+      // A hostile or half-written entry (a directory squatting on a bucket
+      // name, an unreadable file) must not poison the whole read: skip it and
+      // keep serving the healthy buckets.
+      let raw: string;
+      try {
+        raw = fs.readFileSync(path.join(persistDir, files[i]), 'utf8');
+      } catch {
+        continue;
+      }
       const lines = raw.split('\n').reverse(); // newest lines first within a bucket
       for (const line of lines) {
         if (out.length >= limit) break;
         const trimmed = line.trim();
         if (!trimmed) continue;
         try {
-          out.push(JSON.parse(trimmed) as TelemetryEvent);
+          const parsed: unknown = JSON.parse(trimmed);
+          // Only object-shaped lines are events: a valid-JSON primitive
+          // (`null`, a number, a bare string) is not a TelemetryEvent and
+          // must never leak into a `TelemetryEvent[]`.
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            out.push(parsed as TelemetryEvent);
+          }
         } catch {
           // Partial/corrupt line (e.g. crash mid-append): skip, keep reading.
         }
