@@ -459,6 +459,51 @@ export function bindSnapshotSelector(scope: any) {
   };
 }
 
+/**
+ * Resolve the settings form/scope for this plugin's namespace across core
+ * versions.
+ *
+ * Core <= 0.1.x exposed a `settingsScope` client service with
+ * `bind({ namespace })`. Core 0.1.7-rc.1 removed it and replaced it with the
+ * `configForms` service, whose `get(namespace)` returns a form controller.
+ * Both objects expose the same three methods this plugin uses —
+ * `subscribe`, `getSnapshot` and `set` — so one adapter covers both.
+ *
+ * The lookup is deliberate: if `inject` named `settingsScope` on the new
+ * core (or `configForms` on the old one), cordis would hold this plugin's
+ * fiber PENDING forever and the panel would never mount. Declaring only
+ * `slots` and probing for either service keeps the plugin loadable on both.
+ */
+export function resolveSettingsScope(ctx: any, namespace: string): any {
+  // Core 0.1.7-rc.1+: forms are keyed by the Host settings namespace.
+  const forms = ctx?.configForms;
+  if (forms && typeof forms.get === 'function') {
+    try {
+      const form = forms.get(namespace);
+      if (form && typeof form.getSnapshot === 'function') return form;
+    } catch {
+      // Fall through to the legacy seat rather than failing to mount.
+    }
+  }
+  // Legacy core: a namespaced view onto the settings scope service.
+  const legacy = ctx?.settingsScope;
+  if (legacy && typeof legacy.bind === 'function') {
+    try {
+      const scope = legacy.bind({ namespace });
+      if (scope && typeof scope.getSnapshot === 'function') return scope;
+    } catch {
+      // Fall through to the inert scope below.
+    }
+  }
+  // Neither service: return an inert read-only scope so the panel still
+  // renders (empty, non-writable) instead of throwing during activation.
+  return {
+    subscribe: () => () => {},
+    getSnapshot: () => undefined,
+    set: async () => {}
+  };
+}
+
 export function projectConfig(value: any): ClientConfig {
   // Fresh containers: a shallow spread of DEFAULTS would hand every caller the
   // same mutable `quarantines`/`endpoints` objects, so one panel's edit leaked
@@ -1343,7 +1388,7 @@ export function SubagentsOrchestratorSection(props: any) {
 
 export function apply(ctx: any) {
   ensureCss();
-  const scope = ctx.settingsScope.bind({ namespace: NS });
+  const scope = resolveSettingsScope(ctx, NS);
   const useScope = bindSnapshotSelector(scope);
   const endpointTest = bindEndpointTest(ctx);
   ctx.slots.inject('settings.section', () => {
@@ -1360,4 +1405,8 @@ export function apply(ctx: any) {
   }, PLUGIN_ID + ': settings section');
 }
 
-export const inject = ['slots', 'settingsScope'];
+// Only `slots` is required: it exists on every supported core. The settings
+// service is resolved at runtime (see resolveSettingsScope) because naming
+// `settingsScope` here would leave this fiber pending on core >= 0.1.7-rc.1,
+// and naming `configForms` would do the same on older cores.
+export const inject = ['slots'];

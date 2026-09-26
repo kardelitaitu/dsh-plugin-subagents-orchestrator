@@ -3,9 +3,16 @@ import { apply, inject, NS, PLUGIN_ID, formatTrippingDuration } from '../src/cli
 import { bindEndpointTest } from '../src/client/testConnection.js';
 
 describe('Client Settings Section', () => {
-  it('declares slots and settingsScope injection', () => {
+  it('declares slots but NOT a version-specific settings service', () => {
     expect(inject).toContain('slots');
-    expect(inject).toContain('settingsScope');
+    // The settings service is resolved at runtime (resolveSettingsScope)
+    // because its NAME differs by core version: core <= 0.1.x provided
+    // `settingsScope`, core >= 0.1.7-rc.1 replaced it with `configForms`.
+    // Naming either one here leaves the plugin fiber PENDING on the other
+    // core, which the host reports as "waiting for activation" and the
+    // panel never mounts. Both names must therefore stay OUT of inject.
+    expect(inject).not.toContain('settingsScope');
+    expect(inject).not.toContain('configForms');
   });
 
   it('registers settings.section on apply', () => {
