@@ -171,6 +171,14 @@ export interface FailoverState {
    * and the index is only a positional fallback.
    */
   targetKey?: string;
+  /**
+   * The (turn, step) this walk belongs to. `count` is a per-INCIDENT budget,
+   * like `retryIncidents` and `exhaustedAgents`; without the scope a partial
+   * walk from one turn was read as spent by the next, so a long-lived subagent
+   * gave up on a fully healthy pool every few turns.
+   */
+  turn?: unknown;
+  step?: unknown;
 }
 
 /** Provider seed produced by the host for an agent request (`agent/request` event). */

@@ -250,8 +250,25 @@ export function apply(ctx: CordisContext): void {
       return request;
     }
 
+    // Start routing prefers the primary pool, but degrades onto the rescue
+    // chain when every primary is unhealthy -- otherwise a healthy rescue entry
+    // sat idle while starts were handed a tripped primary (the documented
+    // pool-mode degradation tier, DESIGN-pool-fallback.md §4).
+    //
+    // The health test is deliberately PURE. isHealthy() transitions a lapsed
+    // trip to probation as a side effect, and inside .some() that write would
+    // be skipped for every endpoint after the first healthy one -- a read path
+    // silently mutating breaker state. Deriving from the stored value (the same
+    // rule diagnostics uses) keeps this a pure predicate: a lapsed trip reads
+    // healthy, and the real probation write still happens on the next request.
+    const anyPrimaryHealthy = endpoints.some(
+      (e) => defaultCircuitBreaker.getStatus(e).trippedUntil === null || Date.now() >= (defaultCircuitBreaker.getStatus(e).trippedUntil as number)
+    );
+    const chain = anyPrimaryHealthy ? [] : getCachedFallbackChain();
+    const candidates = chain.length > 0 ? [...endpoints, ...chain] : endpoints;
+
     const picked = pickNextEndpoint(
-      endpoints,
+      candidates,
       config.strategy || 'round-robin',
       rrCursor++,
       defaultCircuitBreaker
@@ -335,8 +352,15 @@ export function apply(ctx: CordisContext): void {
       // every bound and walk below degenerates to the previous behavior.
       // A single primary in fallback mode stays eligible for rescue (it is
       // what the chain rescues), so the <2 check counts the combined list.
+      // The chain participates in BOTH modes. DESIGN-pool-fallback.md §4 (owner
+      // approved, §8.3) specifies that in pool mode `fallback:` is appended as a
+      // LOWER penetration tier -- "used only when every primary endpoint is
+      // tripped". Gating it on mode made the documented tier unreachable in the
+      // default pool mode. Primaries precede the chain, so the existing tier
+      // walk still prefers healthy primaries and only descends when none are
+      // left; with no chain configured this is exactly the historical pool.
       const primaryEndpoints = getCachedEndpoints();
-      const fallbackChain = getCachedMode() === 'fallback' ? getCachedFallbackChain() : [];
+      const fallbackChain = getCachedFallbackChain();
       const endpoints = fallbackChain.length > 0 ? [...primaryEndpoints, ...fallbackChain] : primaryEndpoints;
       if (endpoints.length < 2) return next();
 
@@ -483,8 +507,18 @@ export function apply(ctx: CordisContext): void {
       // primary walk (unchanged), then degraded rescue entries.
       const primaryCount = endpoints.length - fallbackChain.length;
       const currentIndex = endpoints.findIndex((e) => defaultCircuitBreaker.getEndpointKey(e) === endpointKey);
-      const current = pendingFailovers.get(agent.id) || { count: 0, index: currentIndex >= 0 ? currentIndex : 0 };
-      if (current.count >= endpoints.length - 1) {
+      // The walk budget is per-INCIDENT. A stored plan from a different
+      // (turn, step) is a finished incident, not a spent budget: reading its
+      // count here made the next turn give up on a healthy pool. Compare by
+      // value (the host may hand back a fresh wrapper), like its siblings.
+      const storedPlan = pendingFailovers.get(agent.id);
+      const planIsThisIncident = storedPlan !== undefined
+        && sameIncidentMarker(storedPlan.turn, payload.turn)
+        && sameIncidentMarker(storedPlan.step, payload.step);
+      const current = planIsThisIncident
+        ? storedPlan
+        : { count: 0, index: currentIndex >= 0 ? currentIndex : 0 };
+      if (planIsThisIncident && current.count >= endpoints.length - 1) {
         // Give up on this agent for this incident. Without clearing the state,
         // a later host-driven retry would still be rewritten onto the stale
         // failover target even though the plugin declined to fail over again.
@@ -589,7 +623,10 @@ export function apply(ctx: CordisContext): void {
         index: nextIndex,
         tier: nextTier,
         // Identity travels with the commit so a list edit cannot relocate it.
-        targetKey: defaultCircuitBreaker.getEndpointKey(target)
+        targetKey: defaultCircuitBreaker.getEndpointKey(target),
+        // The incident this walk belongs to, so the next turn starts fresh.
+        turn: payload.turn,
+        step: payload.step
       });
 
       recordFailover(agent.id, currentEndpoint, target);
