@@ -84,8 +84,14 @@ function parseEndpoint(raw: unknown): Endpoint | null {
 
   const endpoint: Endpoint = { provider, model };
 
+  // Non-blank, not merely non-empty - the same rule as the identity pair
+  // above. A whitespace-only effort survives a bare length check, then gets
+  // injected into every routed request (index.ts tests it for truthiness) and
+  // the host adapter rejects it with UNSUPPORTED_REASONING_EFFORT - a code no
+  // failover trigger covers, so the endpoint is a silent outage. Kept verbatim
+  // otherwise: trimming the value is the user's business.
   const reasoningEffort = raw['reasoningEffort'];
-  if (typeof reasoningEffort === 'string' && reasoningEffort.length > 0) {
+  if (typeof reasoningEffort === 'string' && reasoningEffort.trim().length > 0) {
     endpoint.reasoningEffort = reasoningEffort;
   }
 
