@@ -94,6 +94,26 @@ export interface SettingsService {
 
 let activeSettingsService: SettingsService | null = null;
 let activeRegistrationScope: SettingsRegistrationScope | null = null;
+let activeWatchDispose: (() => void) | null = null;
+
+/**
+ * Stop the currently installed scope watch, if any.
+ *
+ * `scope.watch()` hands back an unsubscribe; discarding it meant a torn-down
+ * composition's watch kept applying stale quarantines to the process-wide
+ * breaker. A disposer that throws must not break dispose either.
+ */
+function releaseActiveWatch(): void {
+  const stop = activeWatchDispose;
+  activeWatchDispose = null;
+  if (stop) {
+    try {
+      stop();
+    } catch {
+      // A broken host disposer is not our failure to propagate.
+    }
+  }
+}
 
 export function getActiveSettingsService(): SettingsService | null {
   return activeSettingsService;
@@ -104,6 +124,7 @@ export function getActiveRegistrationScope(): SettingsRegistrationScope | null {
 }
 
 export function resetSettingsForTest(): void {
+  releaseActiveWatch();
   activeSettingsService = null;
   activeRegistrationScope = null;
 }
@@ -117,53 +138,109 @@ export function resetSettingsForTest(): void {
  * apply() resolve the live service instead of a dead one.
  */
 export function disposeSettings(): void {
+  releaseActiveWatch();
   activeSettingsService = null;
   activeRegistrationScope = null;
 }
 
 /**
+ * A persisted quarantine map is a plain keyed object of numeric timestamps.
+ *
+ * An ARRAY satisfies a bare `typeof === 'object'` check but is not a keyed
+ * map: handing one to applyQuarantines reads as an authoritative-empty
+ * snapshot and silently clears every live quarantine. The schema rejects
+ * arrays, but scope.get() and the watch payload are host-supplied and not
+ * guaranteed to have been validated, so the guard belongs here.
+ */
+function isQuarantineMap(value: unknown): value is Record<string, number> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  // Only a plain keyed map counts. A Date, Map, Set, typed array or class
+  // instance is also "typeof object", and Object.entries() over one yields no
+  // usable keys — so handing it to applyQuarantines reads as an
+  // authoritative-empty snapshot and clears every live quarantine. The
+  // null-prototype form is accepted (Object.create(null) is still a keyed map).
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
  * Register the settings panel when the config opts in. Returns whether the
  * registration was armed. Never throws: a rejected registration (malformed
- * stored section) must not break orchestration, which keeps working through
- * the YAML cache.
+ * stored section), a throwing host inject() or a throwing scope.watch() must
+ * not break orchestration, which keeps working through the YAML cache.
  */
 export function armSettingsPanel(ctx: SettingsPanelContext): boolean {
   const config = getConfig();
   if (config?.ui?.panel !== true) return false;
 
-  ctx.inject(['settings'], (sctx) => {
-    const settings = (sctx as { settings?: SettingsService } | null)?.settings;
-    if (!settings) return;
-    activeSettingsService = settings;
-    try {
-      const scope = settings.register(ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, { base: {} });
-      activeRegistrationScope = scope;
-
-      // Hydrate circuit breaker from persisted settings if present.
-      // Best-effort in its OWN try: a host whose stored section cannot be
-      // read back (get() throwing - exactly the malformed-section case this
-      // file guards against) must not take the live watch down with it, or
-      // UI -> breaker propagation is silently dead for the whole session.
+  try {
+    ctx.inject(['settings'], (sctx) => {
+      const settings = (sctx as { settings?: SettingsService } | null)?.settings;
+      if (!settings) return;
+      activeSettingsService = settings;
       try {
-        const snap = scope?.get?.() as any;
-        if (snap?.quarantines && typeof snap.quarantines === 'object') {
-          defaultCircuitBreaker.applyQuarantines(snap.quarantines);
+        const scope = settings.register(ORCHESTRATOR_SETTINGS_NAMESPACE, orchestratorSettingsSchema, { base: {} });
+        activeRegistrationScope = scope;
+
+        // Hydrate circuit breaker from persisted settings if present.
+        // Best-effort in its OWN try: a host whose stored section cannot be
+        // read back (get() throwing - exactly the malformed-section case this
+        // file guards against) must not take the live watch down with it, or
+        // UI -> breaker propagation is silently dead for the whole session.
+        try {
+          const snap = scope?.get?.() as any;
+          if (isQuarantineMap(snap?.quarantines)) {
+            defaultCircuitBreaker.applyQuarantines(snap.quarantines);
+          }
+        } catch {
+          // Hydration only; the watch below is the panel's actual purpose.
+        }
+
+        // Watch for settings changes from UI. Best-effort in its OWN try,
+        // exactly like the hydration above: register() has already succeeded,
+        // so a host whose watch() throws must NOT be mistaken for a failed
+        // registration - that would discard the live scope and lose the only
+        // persistence path (scope.update). Only register() failing is fatal.
+        try {
+          // A re-arm replaces the previous composition's watch rather than
+          // leaking it.
+          releaseActiveWatch();
+          const stopWatch = scope?.watch?.((next: any) => {
+            try {
+              if (next && typeof next === 'object' && !Array.isArray(next) && 'quarantines' in next) {
+                const incoming = next.quarantines;
+                if (isQuarantineMap(incoming)) {
+                  defaultCircuitBreaker.applyQuarantines(incoming);
+                } else if (incoming === null || incoming === undefined) {
+                  // Key present but empty: an explicit "no quarantines" reset.
+                  defaultCircuitBreaker.applyQuarantines({});
+                }
+                // Any other shape (array/string/number/...) is not a keyed map:
+                // ignore it rather than mistaking it for "no quarantines".
+              }
+            } catch {
+              // A payload accessor that throws must not escape into the host
+              // notification loop.
+            }
+          });
+          activeWatchDispose = typeof stopWatch === 'function' ? stopWatch : null;
+        } catch {
+          // Watch installation only; the registration above stays live.
         }
       } catch {
-        // Hydration only; the watch below is the panel's actual purpose.
+        // A stored section our schema rejects would fail registration loud;
+        // degrade to the plain YAML path instead of failing the plugin. The
+        // previous composition's scope/watch must NOT survive as the active
+        // handle: persist would then write through a registration the host has
+        // already replaced, and the dead watch would keep applying stale state.
+        activeRegistrationScope = null;
+        releaseActiveWatch();
       }
-
-      // Watch for settings changes from UI
-      scope?.watch?.((next: any) => {
-        if (next && typeof next === 'object' && 'quarantines' in next) {
-          defaultCircuitBreaker.applyQuarantines(next.quarantines || {});
-        }
-      });
-    } catch {
-      // A stored section our schema rejects would fail registration loud;
-      // degrade to the plain YAML path instead of failing the plugin.
-    }
-  });
+    });
+  } catch {
+    // A host inject() that throws must not break plugin composition: the
+    // "never throws" contract this entry point documents.
+  }
   return true;
 }
 
