@@ -80,7 +80,12 @@ export function setNoticeModuleForTest(mod: NoticeModule | null): void {
 /** Mirror of the host's `boundContextSummary` ellipsis behavior. */
 function boundSummary(summary: string): string {
   if (summary.length <= NOTICE_SUMMARY_MAX_CHARS) return summary;
-  return summary.slice(0, Math.max(0, NOTICE_SUMMARY_MAX_CHARS - 1)) + '\u2026';
+  // The cut must not land between a surrogate pair, or the model-facing summary
+  // would carry a lone surrogate (mojibake) from an operator-supplied name.
+  let cut = Math.max(0, NOTICE_SUMMARY_MAX_CHARS - 1);
+  const lastIncluded = summary.charCodeAt(cut - 1);
+  if (lastIncluded >= 0xd800 && lastIncluded <= 0xdbff) cut -= 1;
+  return summary.slice(0, cut) + '\u2026';
 }
 
 /**
@@ -92,8 +97,8 @@ function endpointLabel(ref: NoticeEndpointRef | null | undefined): string {
   const provider = ref?.provider;
   const model = ref?.model;
   if (
-    typeof provider !== 'string' || provider.length === 0 ||
-    typeof model !== 'string' || model.length === 0
+    typeof provider !== 'string' || provider.trim().length === 0 ||
+    typeof model !== 'string' || model.trim().length === 0
   ) {
     throw new TypeError('failover notice requires a provider and model on both endpoints');
   }
@@ -117,10 +122,13 @@ export function buildFailoverNotice(info: NoticeFailoverInfo): { summary: string
   const from = endpointLabel(info.from);
   const to = endpointLabel(info.to);
   const hint = formatHint(info.hintMs);
+  // Only a string code is a code: a nullish or non-string code (out-of-contract
+  // host field) must not be rendered as the literal "null"/"[object Object]".
+  const code = typeof info.code === 'string' ? info.code : undefined;
   const reason =
-    info.code !== undefined && hint !== null
-      ? `${info.code}, ${hint}`
-      : info.code ?? hint ?? 'connection failure';
+    code !== undefined && hint !== null
+      ? `${code}, ${hint}`
+      : code ?? hint ?? 'connection failure';
   const summary = boundSummary(`Failover: ${from} -> ${to} (${reason})`);
   const text =
     `[subagents-orchestrator] The endpoint ${from} failed with ${reason}; ` +
